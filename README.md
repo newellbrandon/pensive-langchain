@@ -119,6 +119,38 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 Verify health: `curl http://localhost:8000/health`
 
+## Agent Skills
+
+This project is a good fit for official agent skills that guide coding agents (Cursor, Claude Code, and others) when extending or debugging the workflow.
+
+### [MongoDB Agent Skills](https://github.com/mongodb/agent-skills)
+
+Schema design, connection setup, vector search, natural-language querying, and MCP server configuration for MongoDB.
+
+**Cursor** — install from the marketplace or run:
+
+```
+/add-plugin mongodb
+```
+
+**Any agent** (via [skills.sh](https://skills.sh/)):
+
+```bash
+npx skills add mongodb/agent-skills
+```
+
+Relevant skills for this repo: `mongodb-connection`, `mongodb-schema-design`, `mongodb-search-and-ai`, `mongodb-natural-language-querying`.
+
+### [LangChain Skills](https://github.com/langchain-ai/langchain-skills)
+
+LangGraph workflows, checkpointing, persistence, and LangChain agent patterns.
+
+```bash
+npx skills add langchain-ai/langchain-skills --skill '*' --yes
+```
+
+Relevant skills for this repo: `langgraph-fundamentals`, `langgraph-persistence`, `langchain-fundamentals`, `langchain-dependencies`.
+
 ## Observability
 
 LangSmith tracing is optional and controlled by environment variables in `.env`:
@@ -272,5 +304,7 @@ pensive/
 ```
 
 ## Background
+
+This project was invoked with the agent prompt in [PROMPT.md](PROMPT.md) — a Cursor session using LangGraph and MongoDB agent skills to build a minimal checkpoint + long-term memory demo with streamed workflow decisions and an OpenAI-compatible API.
 
 Inspired by the memory architecture described in [Beyond the Chatbot: Escaping the "Groundhog Day" Loop with Agentic Memory](https://www.rosston.dev/blog/groundhog-day). 
