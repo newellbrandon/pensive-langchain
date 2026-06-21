@@ -153,6 +153,16 @@ Relevant skills for this repo: `langgraph-fundamentals`, `langgraph-persistence`
 
 ## Observability
 
+`user_id`, `chat_id`, and `session_id` come from the OpenWebUI session — not a static env var. Enable header forwarding on your OpenWebUI instance:
+
+```bash
+ENABLE_FORWARD_USER_INFO_HEADERS=True
+```
+
+OpenWebUI then sends `X-OpenWebUI-User-Id`, `X-OpenWebUI-Chat-Id`, and `X-OpenWebUI-Message-Id` on each request to Pensive. Pensive maps `chat_id` to the LangGraph `thread_id` (checkpoint scope per conversation) and forwards all session fields to LangSmith `metadata`.
+
+For `curl` without OpenWebUI, set optional `USER_ID` in `.env` or pass `"user": "demo-user"` in the JSON body.
+
 LangSmith tracing is optional and controlled by environment variables in `.env`:
 
 | Variable | Purpose |
@@ -161,8 +171,9 @@ LangSmith tracing is optional and controlled by environment variables in `.env`:
 | `LANGSMITH_API_KEY` | Your LangSmith API key |
 | `LANGSMITH_PROJECT` | Project name (default: `pensive`) |
 | `LANGSMITH_ENDPOINT` | API endpoint (default: `https://api.smith.langchain.com`) |
+| `USER_ID` | Optional fallback when not using OpenWebUI session headers |
 
-When `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` is set, traces appear at [smith.langchain.com](https://smith.langchain.com) under the configured project. Each chat request produces a top-level run with tags `pensive` and `chat`, including nested LangGraph node spans, `ChatAnthropic` LLM calls, and `voyage_embed` embedding spans during memory search.
+When `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` is set, traces appear at [smith.langchain.com](https://smith.langchain.com) under the configured project. Each chat request produces a top-level run with tags `pensive` and `chat`, `metadata.user_id` from the OpenWebUI user, plus `chat_id` / `session_id` when forwarded, including nested LangGraph node spans, `ChatAnthropic` LLM calls, and `voyage_embed` embedding spans during memory search.
 
 If tracing is disabled or the API key is missing, the API starts normally without reporting to LangSmith.
 
@@ -202,6 +213,13 @@ In OpenWebUI → **Settings → Connections → OpenAI**:
 | API Key | any non-empty string    |
 | Model   | `pensive`               |
 
+On the OpenWebUI server, enable session header forwarding so Pensive receives the logged-in user and chat context:
+
+```bash
+ENABLE_FORWARD_USER_INFO_HEADERS=True
+```
+
+See [OpenWebUI environment variables](https://docs.openwebui.com/getting-started/env-configuration/) for details. Without this, Pensive cannot resolve `user_id` from the OpenWebUI session (unless you set optional `USER_ID` in `.env` for local testing).
 
 Enable streaming in chat settings for the best experience — workflow steps stream before the answer.
 

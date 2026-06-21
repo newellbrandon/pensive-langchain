@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import HumanMessage
@@ -47,13 +47,69 @@ def _message_text(message: ChatMessage) -> str:
     return str(message.content)
 
 
-def _resolve_thread_id(request: ChatCompletionRequest) -> str:
-    if request.metadata and request.metadata.get("thread_id"):
-        return str(request.metadata["thread_id"])
-    if request.metadata and request.metadata.get("chat_id"):
-        return str(request.metadata["chat_id"])
+def _header_value(http_request: Request, header_name: str) -> str | None:
+    value = http_request.headers.get(header_name)
+    if value and value.strip():
+        return value.strip()
+    return None
 
-    user_id = request.user or "anonymous"
+
+def _resolve_user_id(
+    request: ChatCompletionRequest,
+    http_request: Request,
+) -> str:
+    """Resolve OpenWebUI user id from forwarded session headers or request body."""
+    header_user_id = _header_value(http_request, Config.OPENWEBUI_USER_ID_HEADER)
+    if header_user_id:
+        return header_user_id
+
+    if isinstance(request.user, str) and request.user.strip():
+        return request.user.strip()
+    if isinstance(request.user, dict):
+        user_id = request.user.get("id")
+        if user_id:
+            return str(user_id)
+
+    if request.metadata:
+        if request.metadata.get("user_id"):
+            return str(request.metadata["user_id"])
+        if request.metadata.get("user"):
+            return str(request.metadata["user"])
+
+    if Config.USER_ID:
+        return Config.USER_ID
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "user_id not found. Enable ENABLE_FORWARD_USER_INFO_HEADERS=True on OpenWebUI "
+            f"so {Config.OPENWEBUI_USER_ID_HEADER} is sent, or set USER_ID for local testing."
+        ),
+    )
+
+
+def _resolve_thread_id(
+    request: ChatCompletionRequest,
+    http_request: Request,
+    user_id: str,
+) -> str:
+    """Map OpenWebUI chat/session to a LangGraph checkpoint thread_id."""
+    if request.chat_id:
+        return request.chat_id
+
+    header_chat_id = _header_value(http_request, Config.OPENWEBUI_CHAT_ID_HEADER)
+    if header_chat_id:
+        return header_chat_id
+
+    if request.metadata:
+        if request.metadata.get("thread_id"):
+            return str(request.metadata["thread_id"])
+        if request.metadata.get("chat_id"):
+            return str(request.metadata["chat_id"])
+
+    if request.session_id:
+        return f"{user_id}:{request.session_id}"
+
     first_user = next((m for m in request.messages if m.role == "user"), None)
     if first_user:
         seed = f"{user_id}:{_message_text(first_user)}"
@@ -62,8 +118,29 @@ def _resolve_thread_id(request: ChatCompletionRequest) -> str:
     return f"{user_id}:default"
 
 
-def _resolve_user_id(request: ChatCompletionRequest) -> str:
-    return request.user or "anonymous"
+def _resolve_session_metadata(
+    request: ChatCompletionRequest,
+    http_request: Request,
+) -> dict[str, str]:
+    """Collect OpenWebUI session fields for LangSmith metadata."""
+    session: dict[str, str] = {}
+
+    if request.session_id:
+        session["session_id"] = request.session_id
+    if request.chat_id:
+        session["chat_id"] = request.chat_id
+    if request.id:
+        session["message_id"] = request.id
+
+    header_chat_id = _header_value(http_request, Config.OPENWEBUI_CHAT_ID_HEADER)
+    if header_chat_id:
+        session.setdefault("chat_id", header_chat_id)
+
+    header_message_id = _header_value(http_request, Config.OPENWEBUI_MESSAGE_ID_HEADER)
+    if header_message_id:
+        session.setdefault("message_id", header_message_id)
+
+    return session
 
 
 def _latest_user_query(request: ChatCompletionRequest) -> str:
@@ -219,13 +296,17 @@ async def list_models() -> ModelsListResponse:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
-    user_query = _latest_user_query(request)
+async def chat_completions(
+    body: ChatCompletionRequest,
+    http_request: Request,
+):
+    user_query = _latest_user_query(body)
     if not user_query:
         raise HTTPException(status_code=400, detail="No user query found in messages")
 
-    thread_id = _resolve_thread_id(request)
-    user_id = _resolve_user_id(request)
+    user_id = _resolve_user_id(body, http_request)
+    thread_id = _resolve_thread_id(body, http_request, user_id)
+    session_metadata = _resolve_session_metadata(body, http_request)
     config = {
         "configurable": {
             "thread_id": thread_id,
@@ -234,6 +315,7 @@ async def chat_completions(request: ChatCompletionRequest):
         "metadata": {
             "thread_id": thread_id,
             "user_id": user_id,
+            **session_metadata,
         },
         "tags": ["pensive", "chat"],
         "run_name": f"chat:{thread_id}",
@@ -249,9 +331,9 @@ async def chat_completions(request: ChatCompletionRequest):
 
     graph = app.state.graph
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    model_name = request.model or "pensive"
+    model_name = body.model or "pensive"
 
-    if request.stream:
+    if body.stream:
         return StreamingResponse(
             _stream_graph(graph, input_state, config, completion_id, model_name),
             media_type="text/event-stream",

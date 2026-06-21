@@ -47,6 +47,19 @@ class Config:
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
+    # Optional fallback for curl/local testing when no OpenWebUI session headers are present.
+    USER_ID: str = os.getenv("USER_ID", "")
+
+    OPENWEBUI_USER_ID_HEADER: str = os.getenv(
+        "OPENWEBUI_USER_ID_HEADER", "X-OpenWebUI-User-Id"
+    )
+    OPENWEBUI_CHAT_ID_HEADER: str = os.getenv(
+        "OPENWEBUI_CHAT_ID_HEADER", "X-OpenWebUI-Chat-Id"
+    )
+    OPENWEBUI_MESSAGE_ID_HEADER: str = os.getenv(
+        "OPENWEBUI_MESSAGE_ID_HEADER", "X-OpenWebUI-Message-Id"
+    )
+
     @classmethod
     def validate(cls) -> None:
         """Raise RuntimeError with actionable message if required vars are missing."""

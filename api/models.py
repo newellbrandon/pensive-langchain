@@ -15,8 +15,12 @@ class ChatCompletionRequest(BaseModel):
     model: str = "pensive"
     messages: list[ChatMessage]
     stream: bool = False
-    user: Optional[str] = None
+    user: Optional[Union[str, dict[str, Any]]] = None
     metadata: Optional[dict[str, Any]] = None
+    # OpenWebUI session fields (forwarded on external OpenAI connections)
+    chat_id: Optional[str] = None
+    session_id: Optional[str] = None
+    id: Optional[str] = Field(default=None, description="OpenWebUI assistant message id")
 
 
 class ModelObject(BaseModel):

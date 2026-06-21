@@ -65,7 +65,9 @@ def classify_intent(state: AgentState) -> dict:
 def search_long_term_memory(state: AgentState, runtime: Runtime) -> dict:
     """Search MongoDB store for relevant long-term memories."""
     query = _latest_user_message(state)
-    user_id = state.get("user_id") or "anonymous"
+    user_id = state.get("user_id")
+    if not user_id:
+        raise RuntimeError("user_id missing from agent state")
     namespace = ("users", user_id, "memories")
 
     store: BaseStore | None = runtime.store
@@ -153,7 +155,9 @@ async def generate_response(state: AgentState) -> dict:
 async def save_memory(state: AgentState, runtime: Runtime) -> dict:
     """Extract and persist a durable fact when the user shares one."""
     query = _latest_user_message(state)
-    user_id = state.get("user_id") or "anonymous"
+    user_id = state.get("user_id")
+    if not user_id:
+        raise RuntimeError("user_id missing from agent state")
     store: BaseStore | None = runtime.store
 
     if store is None:
