@@ -16,35 +16,35 @@ OpenWebUI sends chat requests to the FastAPI layer, which invokes a compiled Lan
 ```mermaid
 flowchart TD
   owui[OpenWebUI] -->|POST /v1/chat/completions| api[FastAPI]
-  api -->|ainvoke / astream| graph[Compiled LangGraph]
-  graph --> llm[Anthropic-compatible LLM]
-  graph -.->|MongoDBSaver — every superstep| mongoCP["checkpoints<br/>checkpoint_writes"]
-  graph -->|MongoDBStore| mongoStore[(agent_memories)]
-  mongoStore -->|vector search + save| embed[Voyage embeddings]
+  api -->|"ainvoke / astream"| lgWorkflow[Compiled LangGraph]
+  lgWorkflow --> llm[Anthropic-compatible LLM]
+  lgWorkflow -.->|"MongoDBSaver - every superstep"| mongoCP["checkpoints<br/>checkpoint_writes"]
+  lgWorkflow -->|MongoDBStore| mongoStore[(agent_memories)]
+  mongoStore -->|"vector search + save"| embed[Voyage embeddings]
 ```
 
 ### LangGraph workflow
 
-Each chat message runs the four nodes below. OpenWebUI streams the **decision** from each step before the final answer — the labels in *italics* match what you see in the demo screenshots.
+Each chat message runs the four nodes below. OpenWebUI streams the **decision** from each step before the final answer — the second line in each node label matches what you see in the demo screenshots.
 
 The checkpointer persists graph state after every superstep (not only these four nodes), which is why a single message produces multiple `checkpoints` and `checkpoint_writes` documents.
 
 ```mermaid
 flowchart TD
-  START((START)) --> classify["classify_intent<br/><i>Classify Intent</i>"]
+  startNode((START)) --> classify["classify_intent<br/>Classify Intent"]
 
-  classify -->|intent: memory| search["search_long_term_memory<br/><i>Search Long Term Memory</i>"]
-  classify -->|intent: general| generate["generate_response<br/><i>Generate Response</i>"]
+  classify -->|"intent: memory"| search["search_long_term_memory<br/>Search Long Term Memory"]
+  classify -->|"intent: general"| generate["generate_response<br/>Generate Response"]
 
   search -->|store.search| agentMem[(agent_memories)]
   search --> generate
 
-  generate -->|ChatAnthropic| llm{{LLM}}
-  generate --> save["save_memory<br/><i>Save Memory</i>"]
+  generate -->|ChatAnthropic| llmNode{{LLM}}
+  generate --> save["save_memory<br/>Save Memory"]
 
-  save -->|LLM extract fact| llm
-  save -->|store.put — if durable fact| agentMem
-  save --> END((END))
+  save -->|LLM extract fact| llmNode
+  save -->|"store.put - if durable fact"| agentMem
+  save --> endNode((END))
 
   classify -.-> cpNote["checkpoints / checkpoint_writes"]
   search -.-> cpNote
