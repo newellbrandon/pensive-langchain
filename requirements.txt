@@ -1,0 +1,13 @@
+langgraph>=1.0
+langchain>=1.0
+langchain-core
+langsmith>=0.3.0
+langchain-anthropic
+langgraph-checkpoint-mongodb>=0.4.0
+langgraph-store-mongodb>=0.3.0
+pymongo
+python-dotenv
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.0
+httpx>=0.24.0

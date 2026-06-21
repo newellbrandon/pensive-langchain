@@ -1,0 +1,36 @@
+# Pensive API Docker Compose Configuration
+
+services:
+  pensive-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DB=${MONGODB_DB}
+      - LLM_URI=${LLM_URI}
+      - LLM_MODEL=${LLM_MODEL}
+      - LLM_KEY=${LLM_KEY}
+      - LLM_EMBEDDING_URI=${LLM_EMBEDDING_URI}
+      - LLM_EMBEDDING_MODEL=${LLM_EMBEDDING_MODEL}
+      - LLM_EMBEDDING_KEY=${LLM_EMBEDDING_KEY}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
