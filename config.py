@@ -81,17 +81,15 @@ class Config:
             )
 
     @classmethod
-    def anthropic_base_url(cls) -> str:
-        """Derive Anthropic API base URL from LLM_URI.
+    def openai_base_url(cls) -> str:
+        """Derive OpenAI API base URL from LLM_URI.
 
-        The Anthropic SDK posts to {base_url}/v1/messages, so for Grove gateways
-        whose LLM_URI ends in /v1/messages we strip that suffix entirely.
+        ChatOpenAI posts to {base_url}/chat/completions, so strip that suffix
+        when LLM_URI already includes the full completions path.
         """
         uri = cls.LLM_URI.rstrip("/")
-        if uri.endswith("/v1/messages"):
-            return uri[: -len("/v1/messages")]
-        if uri.endswith("/messages"):
-            return uri[: -len("/messages")]
+        if uri.endswith("/chat/completions"):
+            return uri[: -len("/chat/completions")]
         return uri
 
 

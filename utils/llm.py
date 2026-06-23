@@ -1,50 +1,24 @@
 """LLM and embedding helpers."""
 from __future__ import annotations
 
-from functools import cached_property
-from typing import Any, List
+from typing import List
 
 import httpx
-from langchain_anthropic import ChatAnthropic
-from langchain_anthropic.chat_models import _USER_AGENT
 from langchain_core.embeddings import Embeddings
+from langchain_openai import ChatOpenAI
 from langsmith import traceable
 
 from config import Config
 
-GROVE_ANTHROPIC_VERSION = "2023-06-01"
 
-
-class GroveChatAnthropic(ChatAnthropic):
-    """ChatAnthropic configured for the Grove Anthropic gateway."""
-
-    @cached_property
-    def _client_params(self) -> dict[str, Any]:
-        default_headers = {
-            "User-Agent": _USER_AGENT,
-            "api-key": Config.LLM_KEY,
-            "anthropic-version": GROVE_ANTHROPIC_VERSION,
-        }
-        if self.default_headers:
-            default_headers.update(self.default_headers)
-
-        client_params: dict[str, Any] = {
-            # Grove authenticates via the api-key header, not x-api-key.
-            "api_key": "not-used-by-grove",
-            "base_url": self.anthropic_api_url,
-            "max_retries": self.max_retries,
-            "default_headers": default_headers,
-        }
-        if self.default_request_timeout is None or self.default_request_timeout > 0:
-            client_params["timeout"] = self.default_request_timeout
-        return client_params
-
-
-def get_chat_model() -> GroveChatAnthropic:
-    """Return a Grove-configured Anthropic chat model."""
-    return GroveChatAnthropic(
+def get_chat_model() -> ChatOpenAI:
+    """Return a Grove-configured OpenAI-compatible chat model."""
+    return ChatOpenAI(
         model=Config.LLM_MODEL,
-        anthropic_api_url=Config.anthropic_base_url(),
+        openai_api_base=Config.openai_base_url(),
+        # Grove authenticates via the api-key header, not Authorization Bearer.
+        openai_api_key="not-used-by-grove",
+        default_headers={"api-key": Config.LLM_KEY},
         max_tokens=1024,
     )
 
