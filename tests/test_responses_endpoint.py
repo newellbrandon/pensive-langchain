@@ -12,6 +12,7 @@ from api.routes import (
     _build_responses_response,
     _responses_delta_chunk,
     _responses_completed,
+    _assemble_content,
 )
 import json
 
@@ -70,3 +71,21 @@ class TestResponsesStreaming:
         assert event["response"]["object"] == "response"
         text = event["response"]["output"][0]["content"][0]["text"]
         assert text == "final!"
+
+
+class TestAssembleContent:
+    def test_uses_only_supplied_decisions(self):
+        # Decisions passed in represent the CURRENT turn only — historical
+        # decisions are not replayed even if they live on the thread state.
+        final_state = {
+            "response": "Hello!",
+            "decisions": [{"step": "classify_intent", "decision": "memory", "reason": "old turn"}],
+        }
+        current_turn = [{"step": "classify_intent", "decision": "general", "reason": "this turn"}]
+        content = _assemble_content(final_state, current_turn)
+        assert "this turn" in content or "general" in content
+        assert "old turn" not in content
+
+    def test_no_workflow_header_without_decisions(self):
+        content = _assemble_content({"response": "Just an answer"}, [])
+        assert content == "Just an answer"

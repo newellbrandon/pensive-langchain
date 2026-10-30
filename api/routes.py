@@ -240,6 +240,7 @@ async def _stream_responses(
 ) -> AsyncIterator[str]:
     """Stream a Responses API response as response.output_text.delta events."""
     final_state: dict = {}
+    decisions: list[dict] = []
 
     try:
         async for mode, chunk in graph.astream(
@@ -248,6 +249,7 @@ async def _stream_responses(
             stream_mode=["custom", "values"],
         ):
             if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
+                decisions.append(chunk)
                 yield _responses_delta_chunk(completion_id, _format_decision_event(chunk))
             elif mode == "values" and isinstance(chunk, dict):
                 final_state = chunk
@@ -259,18 +261,17 @@ async def _stream_responses(
         yield "data: [DONE]\n\n"
         return
 
+    content = _assemble_content(final_state, decisions)
     answer = final_state.get("response") or ""
     if not answer and final_state.get("messages"):
         last = final_state["messages"][-1]
         answer = getattr(last, "content", "") or str(last)
 
-    decisions_md = "".join(
-        _format_decision_event(d) for d in final_state.get("decisions", [])
-    )
-    content = f"### Workflow{decisions_md}\n---\n\n{answer}" if decisions_md else answer
-
-    if content:
-        words = content.split(" ")
+    # Decisions are streamed live above; stream only the answer as the message
+    # body so they are not shown twice. The completed event carries the full
+    # assembled content for the persisted message.
+    if answer:
+        words = answer.split(" ")
         for index, word in enumerate(words):
             piece = word if index == 0 else f" {word}"
             yield _responses_delta_chunk(completion_id, piece)
@@ -349,6 +350,44 @@ def _final_chunk(completion_id: str, model: str) -> str:
         ],
     }
     return f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n"
+
+
+async def _run_graph(graph, input_state: dict, config: dict, on_decision=None):
+    """Run the graph once; return (final_state, decisions, error).
+
+    ``decisions`` are collected from the *current* invocation's custom stream
+    events so only this turn's workflow steps are surfaced — not the
+    historical decisions that accumulate on the checkpointer thread.
+    """
+    final_state: dict = {}
+    decisions: list[dict] = []
+    error: Exception | None = None
+    try:
+        async for mode, chunk in graph.astream(
+            input_state,
+            config=config,
+            stream_mode=["custom", "values"],
+        ):
+            if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
+                decisions.append(chunk)
+                if on_decision is not None:
+                    await on_decision(chunk)
+            elif mode == "values" and isinstance(chunk, dict):
+                final_state = chunk
+    except Exception as exc:
+        logger.exception("Graph execution failed")
+        error = exc
+    return final_state, decisions, error
+
+
+def _assemble_content(final_state: dict, decisions: list[dict]) -> str:
+    """Build response text from the final state plus this turn's decisions."""
+    answer = final_state.get("response") or ""
+    if not answer and final_state.get("messages"):
+        last = final_state["messages"][-1]
+        answer = getattr(last, "content", "") or str(last)
+    decisions_md = "".join(_format_decision_event(d) for d in decisions)
+    return f"### Workflow{decisions_md}\n---\n\n{answer}" if decisions_md else answer
 
 
 async def _stream_graph(
@@ -484,20 +523,14 @@ async def chat_completions(
         )
 
     try:
-        final_state = await graph.ainvoke(input_state, config=config)
+        final_state, decisions, error = await _run_graph(graph, input_state, config)
     except Exception as exc:
         logger.exception("Graph invocation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
-    answer = final_state.get("response") or ""
-    if not answer and final_state.get("messages"):
-        last = final_state["messages"][-1]
-        answer = getattr(last, "content", "") or str(last)
-
-    decisions_md = "".join(
-        _format_decision_event(d) for d in final_state.get("decisions", [])
-    )
-    content = f"### Workflow{decisions_md}\n---\n\n{answer}" if decisions_md else answer
+    content = _assemble_content(final_state, decisions)
 
     return {
         "id": completion_id,
@@ -569,17 +602,12 @@ async def responses_completions(body: dict, http_request: Request):
         )
 
     try:
-        final_state = await graph.ainvoke(input_state, config=config)
+        final_state, decisions, error = await _run_graph(graph, input_state, config)
     except Exception as exc:
         logger.exception("Graph invocation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
-    answer = final_state.get("response") or ""
-    if not answer and final_state.get("messages"):
-        last = final_state["messages"][-1]
-        answer = getattr(last, "content", "") or str(last)
-    decisions_md = "".join(
-        _format_decision_event(d) for d in final_state.get("decisions", [])
-    )
-    content = f"### Workflow{decisions_md}\n---\n\n{answer}" if decisions_md else answer
+    content = _assemble_content(final_state, decisions)
     return _build_responses_response(completion_id, model_name, content)
