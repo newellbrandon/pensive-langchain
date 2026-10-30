@@ -5,7 +5,7 @@ A minimal AI agent demo using **LangGraph** for workflow orchestration and **Mon
 - **Short-term memory** — LangGraph checkpoints (`MongoDBSaver`) persist conversation state per thread
 - **Long-term memory** — LangGraph Store (`MongoDBStore`) with semantic vector search across sessions
 
-The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.openwebui.com/) or a coding harness (e.g. OpenCode) and chat with the agent. Workflow decisions are surfaced as response metadata; the assistant message contains only the final answer.
+The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.openwebui.com/) or a coding harness (e.g. OpenCode) and chat with the agent. Workflow decisions render as native reasoning **Thought** blocks; the assistant message contains only the final answer.
 
 ## Architecture
 
@@ -269,7 +269,7 @@ See [OpenWebUI environment variables](https://docs.openwebui.com/getting-started
 
 Enable streaming in chat settings for the best experience — the final answer streams token-by-token.
 
-The agent's workflow decisions (**Classify Intent → Search Long Term Memory → Generate Response → Save Memory**) are diagnostics: they are never embedded in the assistant message. They are surfaced as response metadata (`metadata.workflow` on `/v1/responses`, a top-level `workflow` field on `/v1/chat/completions`), so clients that want them can read them and the model's answer remains the final, standalone response.
+The agent's workflow decisions (**Classify Intent → Search Long Term Memory → Generate Response → Save Memory**) are surfaced on the **native reasoning channel**, so OpenAI-compatible clients render them as a collapsible **Thought** block (e.g. OpenCode) or a thinking pane (e.g. OpenWebUI): `/v1/responses` emits a `reasoning` output item / `response.reasoning_summary_text.delta` events; `/v1/chat/completions` sends `message.reasoning_content` / `delta.reasoning_content`. They are also mirrored as structured metadata (`metadata.workflow` on `/v1/responses`, a top-level `workflow` field on `/v1/chat/completions`). The assistant message itself always contains only the final answer.
 
 ## Demo Results (OpenWebUI)
 

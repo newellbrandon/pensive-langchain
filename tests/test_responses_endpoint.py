@@ -14,6 +14,9 @@ from api.routes import (
     _responses_completed,
     _final_answer,
     _stream_responses,
+    _stream_graph,
+    _workflow_thought_text,
+    _build_chat_completion,
     _chat_messages_to_langchain,
     _responses_input_messages,
     _resolve_user_id,
@@ -100,7 +103,7 @@ class TestFinalResponsePurity:
     def test_no_workflow_text_without_decisions(self):
         assert _final_answer({"response": "Just an answer"}) == "Just an answer"
 
-    def test_decisions_live_in_metadata_not_content(self):
+    def test_decisions_live_in_metadata_and_reasoning_not_content(self):
         current_turn = [
             {"type": "decision", "step": "classify_intent", "decision": "general", "reason": "this turn"},
             {"type": "decision", "step": "save_memory", "decision": "saved", "reason": "saved 1 item"},
@@ -108,11 +111,14 @@ class TestFinalResponsePurity:
         resp = _build_responses_response(
             "resp_1", "pensive", "Hello!", decisions=current_turn
         )
-        # Content is pure.
-        assert resp["output"][0]["content"][0]["text"] == "Hello!"
-        # Decisions are carried in the standard metadata field only.
+        # The message content is pure.
+        message = next(i for i in resp["output"] if i["type"] == "message")
+        assert message["content"][0]["text"] == "Hello!"
+        assert "classify_intent" not in message["content"][0]["text"]
+        # Decisions are carried in the reasoning item and the metadata field.
+        reasoning = next(i for i in resp["output"] if i["type"] == "reasoning")
+        assert reasoning["summary"][0]["type"] == "summary_text"
         assert json.loads(resp["metadata"]["workflow"]) == current_turn
-        assert "classify_intent" not in resp["output"][0]["content"][0]["text"]
 
     def test_metadata_empty_without_decisions(self):
         resp = _build_responses_response("resp_1", "pensive", "Hello!")
@@ -125,9 +131,116 @@ class TestFinalResponsePurity:
         line = _responses_completed("resp_abc", "pensive", "Answer", decisions=decisions)
         event = json.loads(line[len("data: "):])
         assert event["type"] == "response.completed"
-        text = event["response"]["output"][0]["content"][0]["text"]
-        assert text == "Answer"
+        message = next(i for i in event["response"]["output"] if i["type"] == "message")
+        assert message["content"][0]["text"] == "Answer"
         assert json.loads(event["response"]["metadata"]["workflow"]) == decisions
+
+
+class TestThoughtRendering:
+    DECISIONS = [
+        {"type": "decision", "step": "classify_intent", "decision": "memory", "reason": "explicit recall"},
+        {"type": "decision", "step": "search_memories", "decision": "2 results", "reason": "semantic=2"},
+        {"type": "decision", "step": "generate_response", "decision": "respond", "reason": "generated"},
+        {"type": "decision", "step": "save_memory", "decision": "saved", "reason": "saved 1 item"},
+    ]
+
+    def test_workflow_thought_text_lists_steps(self):
+        text = _workflow_thought_text(self.DECISIONS)
+        assert "Classify Intent" in text
+        assert "Search Memories" in text
+        assert "Save Memory" in text
+        assert "explicit recall" in text
+
+    def test_responses_output_leads_with_reasoning_item(self):
+        resp = _build_responses_response("resp_1", "pensive", "Hello!", decisions=self.DECISIONS)
+        assert resp["output"][0]["type"] == "reasoning"
+        summary = resp["output"][0]["summary"][0]
+        assert summary["type"] == "summary_text"
+        assert "Classify Intent" in summary["text"]
+        assert "Save Memory" in summary["text"]
+        message = resp["output"][1]
+        assert message["type"] == "message"
+        assert message["content"][0]["text"] == "Hello!"
+
+    def test_responses_no_reasoning_item_without_decisions(self):
+        resp = _build_responses_response("resp_1", "pensive", "Hello!")
+        assert len(resp["output"]) == 1
+        assert resp["output"][0]["type"] == "message"
+
+    def test_stream_responses_emits_reasoning_summary_then_answer(self):
+        graph = _FakeGraph(self.DECISIONS, {"response": "Yes — done."})
+        chunks = asyncio.run(_collect(_stream_responses(graph, {}, {}, "resp_1", "pensive")))
+
+        events = []
+        for chunk in chunks:
+            if not chunk.startswith("data: "):
+                continue
+            line = chunk[len("data: "):].strip()
+            if line == "[DONE]":
+                continue
+            events.append(json.loads(line))
+
+        types = [e["type"] for e in events]
+        assert "response.output_item.added" in types
+        assert "response.reasoning_summary_text.delta" in types
+        assert "response.reasoning_summary_text.done" in types
+        thought = "".join(
+            e["delta"] for e in events if e["type"] == "response.reasoning_summary_text.delta"
+        )
+        assert "Classify Intent" in thought
+        assert "Save Memory" in thought
+        # The answer is still the only output_text content.
+        answer = "".join(
+            e["delta"] for e in events if e["type"] == "response.output_text.delta"
+        )
+        assert answer == "Yes — done."
+        assert "Workflow" not in answer
+
+        completed = next(e for e in events if e["type"] == "response.completed")
+        assert completed["response"]["output"][0]["type"] == "reasoning"
+        message = completed["response"]["output"][1]
+        assert message["type"] == "message"
+        assert message["content"][0]["text"] == "Yes — done."
+
+    def test_chat_completion_message_has_reasoning_content(self):
+        payload = _build_chat_completion(
+            "chatcmpl_1", "pensive", "Hello!", self.DECISIONS, user_query="hi"
+        )
+        message = payload["choices"][0]["message"]
+        assert message["content"] == "Hello!"
+        assert "Save Memory" in message["reasoning_content"]
+        assert payload["workflow"] == self.DECISIONS
+
+    def test_chat_completion_no_reasoning_without_decisions(self):
+        payload = _build_chat_completion("chatcmpl_1", "pensive", "Hello!", [], user_query="hi")
+        message = payload["choices"][0]["message"]
+        assert message["content"] == "Hello!"
+        assert "reasoning_content" not in message
+        assert "workflow" not in payload
+
+    def test_chat_stream_emits_reasoning_content_then_content(self):
+        graph = _FakeGraph(self.DECISIONS, {"response": "Yes — done."})
+        chunks = asyncio.run(_collect(_stream_graph(graph, {}, {}, "chatcmpl_1", "pensive")))
+
+        deltas = []
+        for chunk in chunks:
+            for line in chunk.split("\n\n"):
+                if not line.startswith("data: "):
+                    continue
+                data = line[len("data: "):].strip()
+                if data == "[DONE]":
+                    continue
+                event = json.loads(data)
+                choices = event.get("choices") or []
+                for choice in choices:
+                    if isinstance(choice.get("delta"), dict):
+                        deltas.append(choice["delta"])
+
+        reasoning = "".join(d.get("reasoning_content", "") or "" for d in deltas)
+        content = "".join(d.get("content", "") or "" for d in deltas)
+        assert "Classify Intent" in reasoning
+        assert "Save Memory" in reasoning
+        assert content == "Yes — done."
 
 
 class _FakeGraph:
@@ -177,7 +290,8 @@ class TestStreamingPurity:
         meta = json.loads(completed["response"]["metadata"]["workflow"])
         assert meta[0]["step"] == "classify_intent"
         assert meta[1]["step"] == "save_memory"
-        assert completed["response"]["output"][0]["content"][0]["text"] == "Yes — done."
+        message = next(i for i in completed["response"]["output"] if i["type"] == "message")
+        assert message["content"][0]["text"] == "Yes — done."
 
 
 class TestContextPreservation:

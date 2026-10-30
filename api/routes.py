@@ -231,29 +231,34 @@ def _build_responses_response(
     """Build a non-streaming OpenAI Responses API response object.
 
     ``content`` is the model's final answer — the ONLY text in the message.
-    Current-turn workflow decisions (if any) are carried in the standard
-    ``metadata`` field so clients can inspect them without them appearing in
-    the assistant output.
+    Current-turn workflow decisions are rendered on the native reasoning
+    channel (a ``reasoning`` output item) so clients show them as a thought
+    block, and mirrored in the standard ``metadata`` field for inspection.
     """
+    decisions = decisions or []
+    output: list[dict] = []
+    if decisions:
+        output.append(_reasoning_item(completion_id, _workflow_thought_text(decisions)))
+    output.append(
+        {
+            "id": f"msg_{completion_id}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "annotations": [], "logprobs": [], "text": content}
+            ],
+            "phase": "final_answer",
+        }
+    )
     return {
         "id": completion_id,
         "object": "response",
         "created_at": int(time.time()),
         "status": "completed",
         "model": model,
-        "metadata": _workflow_metadata(decisions or []),
-        "output": [
-            {
-                "id": f"msg_{completion_id}",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [
-                    {"type": "output_text", "annotations": [], "logprobs": [], "text": content}
-                ],
-                "phase": "final_answer",
-            }
-        ],
+        "metadata": _workflow_metadata(decisions),
+        "output": output,
         "usage": {
             "input_tokens": 0,
             "output_tokens": (len(content) + 3) // 4,
@@ -272,6 +277,11 @@ def _responses_delta_chunk(completion_id: str, text: str) -> str:
     }
     return f"data: {json.dumps(payload)}\n\n"
 
+def _word_pieces(text: str) -> list[str]:
+    """Split text into word-sized streaming pieces (spaces preserved)."""
+    words = text.split(" ")
+    return [w if i == 0 else f" {w}" for i, w in enumerate(words)]
+
 def _responses_completed(
     completion_id: str,
     model: str,
@@ -280,6 +290,34 @@ def _responses_completed(
 ) -> str:
     response = _build_responses_response(completion_id, model, content, decisions)
     payload = {"type": "response.completed", "response": response}
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_output_item_added(completion_id: str, item: dict) -> str:
+    payload = {"type": "response.output_item.added", "output_index": 0, "item": item}
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_output_item_done(completion_id: str, item: dict) -> str:
+    payload = {"type": "response.output_item.done", "output_index": 0, "item": item}
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_reasoning_delta(completion_id: str, text: str) -> str:
+    payload = {
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": f"rs_{completion_id}",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": text,
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_reasoning_done(completion_id: str, text: str) -> str:
+    payload = {
+        "type": "response.reasoning_summary_text.done",
+        "item_id": f"rs_{completion_id}",
+        "output_index": 0,
+        "content_index": 0,
+        "text": text,
+    }
     return f"data: {json.dumps(payload)}\n\n"
 
 def _workflow_metadata(decisions: list[dict]) -> dict[str, str]:
@@ -291,6 +329,34 @@ def _workflow_metadata(decisions: list[dict]) -> dict[str, str]:
     if not decisions:
         return {}
     return {"workflow": json.dumps(decisions)}
+
+def _workflow_thought_text(decisions: list[dict]) -> str:
+    """Format current-turn decisions as reasoning/thought text.
+
+    Emitted on the native reasoning channel (Responses ``reasoning`` item /
+    chat ``reasoning_content``) so OpenAI-compatible clients render it as a
+    collapsible thought block — never as part of the final answer.
+    """
+    lines = ["Workflow decisions for this query:"]
+    for event in decisions:
+        step = event.get("step", "step")
+        decision = event.get("decision", "")
+        reason = event.get("reason", "")
+        label = step.replace("_", " ").title()
+        line = f"- {label}: {decision}"
+        if reason:
+            line += f" — {reason}"
+        lines.append(line)
+    return "\n".join(lines)
+
+def _reasoning_item(completion_id: str, text: str, in_progress: bool = False) -> dict:
+    """Build a Responses API ``reasoning`` output item carrying the thought."""
+    return {
+        "id": f"rs_{completion_id}",
+        "type": "reasoning",
+        "status": "in_progress" if in_progress else "completed",
+        "summary": [] if in_progress else [{"type": "summary_text", "text": text}],
+    }
 
 def _final_answer(final_state: dict) -> str:
     """Extract the model's answer — the sole content of the final response."""
@@ -307,11 +373,12 @@ async def _stream_responses(
     completion_id: str,
     model: str,
 ) -> AsyncIterator[str]:
-    """Stream a Responses API response as response.output_text.delta events.
+    """Stream a Responses API response.
 
-    Only the model's final answer is streamed as output text. Workflow
-    decisions are collected and attached to the completed event's metadata —
-    they are never part of the message content.
+    Workflow decisions are streamed on the native reasoning channel
+    (``response.reasoning_summary_text.delta``) so clients render them as a
+    thought block; the model's final answer is the only output text. Decisions
+    are also mirrored on the completed event's metadata.
     """
     final_state: dict = {}
     decisions: list[dict] = []
@@ -336,11 +403,22 @@ async def _stream_responses(
 
     content = _final_answer(final_state)
 
-    # Stream only the answer word-by-word; decisions travel in metadata.
+    # Reasoning channel: workflow decisions as a thought block.
+    if decisions:
+        thought = _workflow_thought_text(decisions)
+        yield _responses_output_item_added(
+            completion_id, _reasoning_item(completion_id, "", in_progress=True)
+        )
+        for piece in _word_pieces(thought):
+            yield _responses_reasoning_delta(completion_id, piece)
+        yield _responses_reasoning_done(completion_id, thought)
+        yield _responses_output_item_done(
+            completion_id, _reasoning_item(completion_id, thought)
+        )
+
+    # Message channel: only the answer, word-by-word.
     if content:
-        words = content.split(" ")
-        for index, word in enumerate(words):
-            piece = word if index == 0 else f" {word}"
+        for piece in _word_pieces(content):
             yield _responses_delta_chunk(completion_id, piece)
 
     yield _responses_completed(completion_id, model, content, decisions)
@@ -371,6 +449,21 @@ def _role_chunk(completion_id: str, model: str) -> str:
                 "finish_reason": None,
             }
         ],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _reasoning_chunk(completion_id: str, model: str, text: str, role: bool = False) -> str:
+    """Chat-completions chunk carrying ``delta.reasoning_content`` (the
+    DeepSeek/OpenRouter convention for thinking blocks)."""
+    delta: dict = {"reasoning_content": text}
+    if role:
+        delta["role"] = "assistant"
+    payload = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
     }
     return f"data: {json.dumps(payload)}\n\n"
 
@@ -440,10 +533,14 @@ async def _stream_graph(
     completion_id: str,
     model: str,
 ) -> AsyncIterator[str]:
-    """Stream the model's final answer only (chat completions SSE)."""
-    final_state: dict = {}
+    """Stream the model's final answer (chat completions SSE).
 
-    yield _role_chunk(completion_id, model)
+    Workflow decisions are streamed first as ``delta.reasoning_content``
+    (rendered as a thought block by OpenAI-compatible clients); the answer is
+    the only ``content``.
+    """
+    final_state: dict = {}
+    decisions: list[dict] = []
 
     try:
         async for mode, chunk in graph.astream(
@@ -451,7 +548,9 @@ async def _stream_graph(
             config=config,
             stream_mode=["custom", "values"],
         ):
-            if mode == "values" and isinstance(chunk, dict):
+            if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
+                decisions.append(chunk)
+            elif mode == "values" and isinstance(chunk, dict):
                 final_state = chunk
     except Exception as exc:
         logger.exception("Graph streaming failed")
@@ -465,6 +564,14 @@ async def _stream_graph(
 
     answer = _final_answer(final_state)
 
+    if decisions:
+        thought = _workflow_thought_text(decisions)
+        pieces = _word_pieces(thought)
+        for index, piece in enumerate(pieces):
+            yield _reasoning_chunk(completion_id, model, piece, role=(index == 0))
+    else:
+        yield _role_chunk(completion_id, model)
+
     if answer:
         # Stream answer in word-sized chunks for smoother UX
         words = answer.split(" ")
@@ -477,6 +584,45 @@ async def _stream_graph(
                 buffer = ""
 
     yield _final_chunk(completion_id, model)
+
+def _build_chat_completion(
+    completion_id: str,
+    model: str,
+    content: str,
+    decisions: list[dict],
+    user_query: str,
+) -> dict:
+    """Build a non-streaming Chat Completions response.
+
+    The model's answer is the only ``message.content``. Workflow decisions are
+    attached as ``message.reasoning_content`` (rendered as a thought block)
+    and mirrored in a top-level ``workflow`` field.
+    """
+    message: dict = {"role": "assistant", "content": content}
+    if decisions:
+        message["reasoning_content"] = _workflow_thought_text(decisions)
+    payload: dict = {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(user_query) // 4,
+            "completion_tokens": len(content) // 4,
+            "total_tokens": (len(user_query) + len(content)) // 4,
+        },
+    }
+    if decisions:
+        payload["workflow"] = decisions
+    return payload
+
 
 @app.on_event("startup")
 async def startup_event() -> None:
@@ -569,30 +715,7 @@ async def chat_completions(
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     content = _final_answer(final_state)
-
-    # The model's answer is the final response; workflow decisions are
-    # diagnostics and travel in a top-level field, never in message content.
-    payload: dict = {
-        "id": completion_id,
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model_name,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {
-            "prompt_tokens": len(user_query) // 4,
-            "completion_tokens": len(content) // 4,
-            "total_tokens": (len(user_query) + len(content)) // 4,
-        },
-    }
-    if decisions:
-        payload["workflow"] = decisions
-    return payload
+    return _build_chat_completion(completion_id, model_name, content, decisions, user_query)
 
 @app.post("/v1/responses")
 async def responses_completions(body: dict, http_request: Request):
