@@ -262,6 +262,43 @@ class TestResponsesClientTools:
             {"id": "call_abc", "name": "read", "arguments": '{"path": "README.md"}'}
         ]
 
+    def test_repairs_raw_newlines_in_tool_call_arguments(self):
+        # Models sometimes hand-craft retry arguments with raw newlines inside
+        # JSON strings, which clients cannot parse. They must be escaped.
+        raw = '{"path": "a.py", "content": "line1\nline2\n"}'
+        data = {
+            "output": [
+                {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "write",
+                    "arguments": raw,
+                }
+            ]
+        }
+        calls = ResponsesClient._extract_tool_calls(data)
+        assert calls[0]["arguments"] == '{"path": "a.py", "content": "line1\\nline2\\n"}'
+        # and the repaired value must round-trip as valid JSON
+        import json as _json
+
+        assert _json.loads(calls[0]["arguments"])["content"] == "line1\nline2\n"
+
+    def test_keeps_raw_arguments_when_repair_impossible(self):
+        data = {
+            "output": [
+                {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "write",
+                    "arguments": "definitely not json",
+                }
+            ]
+        }
+        calls = ResponsesClient._extract_tool_calls(data)
+        assert calls[0]["arguments"] == "definitely not json"
+
     def test_error_surfaces_upstream_response_body(self):
         resp = MagicMock()
         resp.status_code = 400

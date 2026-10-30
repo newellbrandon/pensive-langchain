@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Sequence
 
 import httpx
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from utils.llm import get_responses_client
@@ -32,9 +32,8 @@ logger = logging.getLogger(__name__)
 
 MEMORY_TYPES = ("semantic", "episodic", "taxonomic", "procedural")
 ALL_TYPES = list(MEMORY_TYPES)
-SEARCH_TOP_K = 5
+SEARCH_TOP_K = 8
 RERANK_TOP_K = 5
-RECENT_TURNS = 6
 
 DEFAULT_VOYAGE_RERANK_URL = "https://ai.mongodb.com/v1/rerank"
 VOYAGE_RERANK_MODEL = "rerank-2.5-lite"
@@ -97,25 +96,54 @@ def _extract_json(text: str, pattern) -> Any | None:
 
 # --- intent planning ---------------------------------------------------------
 
+def _intent_context(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
+    """Text-only context for intent analysis: the latest user message and the
+    most recent assistant reply.
+
+    Tool calls and results are excluded. Truncating a tool-heavy transcript
+    would split ``function_call``/``function_call_output`` pairs, which the
+    upstream AI gateway rejects ("No tool call found for function call output")
+    — and intent classification has no use for tool payloads anyway.
+    """
+    picked: list[AnyMessage] = []
+    for message in reversed(messages):
+        if isinstance(message, SystemMessage):
+            continue
+        if isinstance(message, ToolMessage):
+            continue
+        if getattr(message, "tool_calls", None):
+            continue
+        content = getattr(message, "content", None)
+        if not content:
+            continue
+        picked.append(message)
+        if len(picked) >= 2:
+            break
+    return list(reversed(picked))
+
+
 async def plan_memory_query(client: Any, messages: Sequence[AnyMessage]) -> MemoryPlan:
     """Ask the LLM for intent and a semantic search query (JSON response)."""
-    recent = [m for m in messages if not isinstance(m, SystemMessage)][-RECENT_TURNS:]
+    recent = _intent_context(messages)
     try:
-        raw = await client.agenerate([SystemMessage(content=INTENT_PROMPT), *recent])
-        data = _extract_json(str(raw), _JSON_OBJECT)
-        if isinstance(data, dict):
-            return MemoryPlan(
-                intent=str(data.get("intent") or ""),
-                needs_memory=bool(data.get("needs_memory")),
-                query=str(data.get("query") or ""),
-                rationale=str(data.get("rationale") or ""),
-            )
+        if recent:
+            raw = await client.agenerate([SystemMessage(content=INTENT_PROMPT), *recent])
+            data = _extract_json(str(raw), _JSON_OBJECT)
+            if isinstance(data, dict):
+                return MemoryPlan(
+                    intent=str(data.get("intent") or ""),
+                    needs_memory=bool(data.get("needs_memory")),
+                    query=str(data.get("query") or ""),
+                    rationale=str(data.get("rationale") or ""),
+                )
     except Exception:
-        logger.exception("Memory intent analysis failed; searching with the raw user message")
+        logger.exception("Memory intent analysis failed; skipping memory search")
     text = latest_user_text(messages)
+    # A failed analysis must not claim memory is needed: this turn proceeds as
+    # a general query (the answer is still grounded in the harness context).
     return MemoryPlan(
         intent=text,
-        needs_memory=bool(text),
+        needs_memory=False,
         query=text,
         rationale="Intent analysis unavailable",
     )

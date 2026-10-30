@@ -220,6 +220,29 @@ class ResponsesClient:
         return "".join(parts)
 
     @staticmethod
+    def _normalize_arguments(arguments: str) -> str:
+        """Return canonical JSON for tool-call arguments.
+
+        The gateway's structured function-call output is already valid JSON,
+        but models sometimes hand-craft retries with raw newlines/tabs inside
+        JSON strings, which breaks the client's parser. Repair by escaping raw
+        control characters, re-parsing, and re-serializing when possible; keep
+        the raw value when the arguments are irreparable.
+        """
+        candidates = [
+            arguments,
+            arguments.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"),
+        ]
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                return json.dumps(parsed)
+        return arguments
+
+    @staticmethod
     def _extract_tool_calls(data: dict) -> list[dict]:
         """Return ``function_call`` output items as {id, name, arguments}."""
         calls: list[dict] = []
@@ -230,7 +253,9 @@ class ResponsesClient:
                 {
                     "id": item.get("call_id") or item.get("id") or "",
                     "name": item.get("name", ""),
-                    "arguments": item.get("arguments") or "",
+                    "arguments": ResponsesClient._normalize_arguments(
+                        item.get("arguments") or ""
+                    ),
                 }
             )
         return calls
