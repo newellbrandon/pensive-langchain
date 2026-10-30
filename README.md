@@ -5,7 +5,7 @@ A minimal AI agent demo using **LangGraph** for workflow orchestration and **Mon
 - **Short-term memory** — LangGraph checkpoints (`MongoDBSaver`) persist conversation state per thread
 - **Long-term memory** — LangGraph Store (`MongoDBStore`) with semantic vector search across sessions
 
-The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.openwebui.com/) and chat with the agent while watching streamed workflow decisions.
+The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.openwebui.com/) or a coding harness (e.g. OpenCode) and chat with the agent. Workflow decisions are surfaced as response metadata; the assistant message contains only the final answer.
 
 ## Architecture
 
@@ -267,11 +267,13 @@ ENABLE_FORWARD_USER_INFO_HEADERS=True
 
 See [OpenWebUI environment variables](https://docs.openwebui.com/getting-started/env-configuration/) for details. Without this, Pensive cannot resolve `user_id` from the OpenWebUI session (unless you set optional `USER_ID` in `.env` for local testing).
 
-Enable streaming in chat settings for the best experience — workflow steps stream before the answer.
+Enable streaming in chat settings for the best experience — the final answer streams token-by-token.
+
+The agent's workflow decisions (**Classify Intent → Search Long Term Memory → Generate Response → Save Memory**) are diagnostics: they are never embedded in the assistant message. They are surfaced as response metadata (`metadata.workflow` on `/v1/responses`, a top-level `workflow` field on `/v1/chat/completions`), so clients that want them can read them and the model's answer remains the final, standalone response.
 
 ## Demo Results (OpenWebUI)
 
-These screenshots show Pensive connected to OpenWebUI with streaming enabled. Each response includes the agent workflow steps before the answer.
+These screenshots show Pensive connected to OpenWebUI with streaming enabled. The streamed response is the final answer; the workflow trace below is shown for reference:
 
 ### Session 1 — Save a fact
 

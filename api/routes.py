@@ -39,7 +39,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def _message_text(message: ChatMessage) -> str:
     if isinstance(message.content, str):
         return message.content
@@ -51,13 +50,11 @@ def _message_text(message: ChatMessage) -> str:
         return " ".join(parts)
     return str(message.content)
 
-
 def _header_value(http_request: Request, header_name: str) -> str | None:
     value = http_request.headers.get(header_name)
     if value and value.strip():
         return value.strip()
     return None
-
 
 def _resolve_user_id(
     request: ChatCompletionRequest,
@@ -91,7 +88,6 @@ def _resolve_user_id(
     logger.warning("No user id from headers/body/Config; falling back to default user")
     return "default"
 
-
 def _resolve_thread_id(
     request: ChatCompletionRequest,
     http_request: Request,
@@ -121,7 +117,6 @@ def _resolve_thread_id(
         return f"{user_id}:{digest}"
     return f"{user_id}:default"
 
-
 def _resolve_session_metadata(
     request: ChatCompletionRequest,
     http_request: Request,
@@ -146,7 +141,6 @@ def _resolve_session_metadata(
 
     return session
 
-
 def _latest_user_query(request: ChatCompletionRequest) -> str:
     for message in reversed(request.messages):
         if message.role == "user":
@@ -155,9 +149,7 @@ def _latest_user_query(request: ChatCompletionRequest) -> str:
                 return text
     return ""
 
-
 # --- OpenAI Responses API helpers ---------------------------------------------
-
 
 def _responses_input_text(item: dict) -> str:
     """Extract text from a Responses API input item."""
@@ -173,7 +165,6 @@ def _responses_input_text(item: dict) -> str:
                     parts.append(str(block.get("text", "")))
         return " ".join(parts)
     return str(content or "")
-
 
 def _chat_messages_to_langchain(body_messages: list) -> list[BaseMessage]:
     """Convert a Chat Completions message list into LangChain messages, preserving
@@ -191,7 +182,6 @@ def _chat_messages_to_langchain(body_messages: list) -> list[BaseMessage]:
         else:
             out.append(HumanMessage(content=f"[{role}] {text}" if text else text))
     return out
-
 
 def _responses_input_messages(body: dict) -> list[BaseMessage]:
     """Convert a Responses API request (instructions + input items) into
@@ -219,7 +209,6 @@ def _responses_input_messages(body: dict) -> list[BaseMessage]:
                 out.append(HumanMessage(content=f"[{role}] {text}" if text else text))
     return out
 
-
 def _responses_latest_user_query(body: dict) -> str:
     """Return the latest user message text from a Responses API request body."""
     raw = body.get("input")
@@ -233,15 +222,26 @@ def _responses_latest_user_query(body: dict) -> str:
                     return text
     return ""
 
+def _build_responses_response(
+    completion_id: str,
+    model: str,
+    content: str,
+    decisions: list[dict] | None = None,
+) -> dict:
+    """Build a non-streaming OpenAI Responses API response object.
 
-def _build_responses_response(completion_id: str, model: str, content: str) -> dict:
-    """Build a non-streaming OpenAI Responses API response object."""
+    ``content`` is the model's final answer — the ONLY text in the message.
+    Current-turn workflow decisions (if any) are carried in the standard
+    ``metadata`` field so clients can inspect them without them appearing in
+    the assistant output.
+    """
     return {
         "id": completion_id,
         "object": "response",
         "created_at": int(time.time()),
         "status": "completed",
         "model": model,
+        "metadata": _workflow_metadata(decisions or []),
         "output": [
             {
                 "id": f"msg_{completion_id}",
@@ -262,7 +262,6 @@ def _build_responses_response(completion_id: str, model: str, content: str) -> d
         "error": None,
     }
 
-
 def _responses_delta_chunk(completion_id: str, text: str) -> str:
     payload = {
         "type": "response.output_text.delta",
@@ -273,12 +272,33 @@ def _responses_delta_chunk(completion_id: str, text: str) -> str:
     }
     return f"data: {json.dumps(payload)}\n\n"
 
-
-def _responses_completed(completion_id: str, model: str, content: str) -> str:
-    response = _build_responses_response(completion_id, model, content)
+def _responses_completed(
+    completion_id: str,
+    model: str,
+    content: str,
+    decisions: list[dict] | None = None,
+) -> str:
+    response = _build_responses_response(completion_id, model, content, decisions)
     payload = {"type": "response.completed", "response": response}
     return f"data: {json.dumps(payload)}\n\n"
 
+def _workflow_metadata(decisions: list[dict]) -> dict[str, str]:
+    """Serialize current-turn workflow decisions for response metadata.
+
+    Decisions are diagnostics and must never be part of the assistant message
+    text; the model's answer is the final response.
+    """
+    if not decisions:
+        return {}
+    return {"workflow": json.dumps(decisions)}
+
+def _final_answer(final_state: dict) -> str:
+    """Extract the model's answer — the sole content of the final response."""
+    answer = final_state.get("response") or ""
+    if not answer and final_state.get("messages"):
+        last = final_state["messages"][-1]
+        answer = getattr(last, "content", "") or str(last)
+    return str(answer)
 
 async def _stream_responses(
     graph,
@@ -287,7 +307,12 @@ async def _stream_responses(
     completion_id: str,
     model: str,
 ) -> AsyncIterator[str]:
-    """Stream a Responses API response as response.output_text.delta events."""
+    """Stream a Responses API response as response.output_text.delta events.
+
+    Only the model's final answer is streamed as output text. Workflow
+    decisions are collected and attached to the completed event's metadata —
+    they are never part of the message content.
+    """
     final_state: dict = {}
     decisions: list[dict] = []
 
@@ -299,7 +324,6 @@ async def _stream_responses(
         ):
             if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
                 decisions.append(chunk)
-                yield _responses_delta_chunk(completion_id, _format_decision_event(chunk))
             elif mode == "values" and isinstance(chunk, dict):
                 final_state = chunk
     except Exception as exc:
@@ -310,32 +334,17 @@ async def _stream_responses(
         yield "data: [DONE]\n\n"
         return
 
-    content = _assemble_content(final_state, decisions)
-    answer = final_state.get("response") or ""
-    if not answer and final_state.get("messages"):
-        last = final_state["messages"][-1]
-        answer = getattr(last, "content", "") or str(last)
+    content = _final_answer(final_state)
 
-    # Decisions are streamed live above; stream only the answer as the message
-    # body so they are not shown twice. The completed event carries the full
-    # assembled content for the persisted message.
-    if answer:
-        words = answer.split(" ")
+    # Stream only the answer word-by-word; decisions travel in metadata.
+    if content:
+        words = content.split(" ")
         for index, word in enumerate(words):
             piece = word if index == 0 else f" {word}"
             yield _responses_delta_chunk(completion_id, piece)
 
-    yield _responses_completed(completion_id, model, content)
+    yield _responses_completed(completion_id, model, content, decisions)
     yield "data: [DONE]\n\n"
-
-
-def _format_decision_event(event: dict) -> str:
-    step = event.get("step", "step")
-    decision = event.get("decision", "")
-    reason = event.get("reason", "")
-    label = step.replace("_", " ").title()
-    return f"\n> **{label}**: {decision} — {reason}\n"
-
 
 class _RequestBodyAdapter:
     """Expose Responses API body fields as the ChatCompletionRequest attributes
@@ -348,7 +357,6 @@ class _RequestBodyAdapter:
         self.chat_id = body.get("chat_id")
         self.session_id = body.get("session_id")
         self.messages = []
-
 
 def _role_chunk(completion_id: str, model: str) -> str:
     payload = {
@@ -366,7 +374,6 @@ def _role_chunk(completion_id: str, model: str) -> str:
     }
     return f"data: {json.dumps(payload)}\n\n"
 
-
 def _chunk_payload(content: str, completion_id: str, model: str) -> str:
     payload = {
         "id": completion_id,
@@ -383,7 +390,6 @@ def _chunk_payload(content: str, completion_id: str, model: str) -> str:
     }
     return f"data: {json.dumps(payload)}\n\n"
 
-
 def _final_chunk(completion_id: str, model: str) -> str:
     payload = {
         "id": completion_id,
@@ -399,7 +405,6 @@ def _final_chunk(completion_id: str, model: str) -> str:
         ],
     }
     return f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n"
-
 
 async def _run_graph(graph, input_state: dict, config: dict, on_decision=None):
     """Run the graph once; return (final_state, decisions, error).
@@ -428,17 +433,6 @@ async def _run_graph(graph, input_state: dict, config: dict, on_decision=None):
         error = exc
     return final_state, decisions, error
 
-
-def _assemble_content(final_state: dict, decisions: list[dict]) -> str:
-    """Build response text from the final state plus this turn's decisions."""
-    answer = final_state.get("response") or ""
-    if not answer and final_state.get("messages"):
-        last = final_state["messages"][-1]
-        answer = getattr(last, "content", "") or str(last)
-    decisions_md = "".join(_format_decision_event(d) for d in decisions)
-    return f"### Workflow{decisions_md}\n---\n\n{answer}" if decisions_md else answer
-
-
 async def _stream_graph(
     graph,
     input_state: dict,
@@ -446,7 +440,7 @@ async def _stream_graph(
     completion_id: str,
     model: str,
 ) -> AsyncIterator[str]:
-    """Stream workflow decisions, then the final answer."""
+    """Stream the model's final answer only (chat completions SSE)."""
     final_state: dict = {}
 
     yield _role_chunk(completion_id, model)
@@ -457,9 +451,7 @@ async def _stream_graph(
             config=config,
             stream_mode=["custom", "values"],
         ):
-            if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
-                yield _chunk_payload(_format_decision_event(chunk), completion_id, model)
-            elif mode == "values" and isinstance(chunk, dict):
+            if mode == "values" and isinstance(chunk, dict):
                 final_state = chunk
     except Exception as exc:
         logger.exception("Graph streaming failed")
@@ -471,10 +463,7 @@ async def _stream_graph(
         yield _final_chunk(completion_id, model)
         return
 
-    answer = final_state.get("response") or ""
-    if not answer and final_state.get("messages"):
-        last = final_state["messages"][-1]
-        answer = getattr(last, "content", "") or str(last)
+    answer = _final_answer(final_state)
 
     if answer:
         # Stream answer in word-sized chunks for smoother UX
@@ -489,7 +478,6 @@ async def _stream_graph(
 
     yield _final_chunk(completion_id, model)
 
-
 @app.on_event("startup")
 async def startup_event() -> None:
     Config.validate()
@@ -498,11 +486,9 @@ async def startup_event() -> None:
     app.state.graph = build_graph()
     logger.info("Pensive API started (db=%s)", Config.MONGODB_DB)
 
-
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     close()
-
 
 @app.get("/health")
 async def health() -> JSONResponse:
@@ -515,13 +501,11 @@ async def health() -> JSONResponse:
             content={"status": "error", "detail": "MongoDB not connected"},
         )
 
-
 @app.get("/v1/models")
 async def list_models() -> ModelsListResponse:
     return ModelsListResponse(
         data=[ModelObject(id="pensive", created=int(time.time()))]
     )
-
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
@@ -584,9 +568,11 @@ async def chat_completions(
     if error:
         raise HTTPException(status_code=500, detail=str(error)) from error
 
-    content = _assemble_content(final_state, decisions)
+    content = _final_answer(final_state)
 
-    return {
+    # The model's answer is the final response; workflow decisions are
+    # diagnostics and travel in a top-level field, never in message content.
+    payload: dict = {
         "id": completion_id,
         "object": "chat.completion",
         "created": int(time.time()),
@@ -604,7 +590,9 @@ async def chat_completions(
             "total_tokens": (len(user_query) + len(content)) // 4,
         },
     }
-
+    if decisions:
+        payload["workflow"] = decisions
+    return payload
 
 @app.post("/v1/responses")
 async def responses_completions(body: dict, http_request: Request):
@@ -668,5 +656,5 @@ async def responses_completions(body: dict, http_request: Request):
     if error:
         raise HTTPException(status_code=500, detail=str(error)) from error
 
-    content = _assemble_content(final_state, decisions)
-    return _build_responses_response(completion_id, model_name, content)
+    content = _final_answer(final_state)
+    return _build_responses_response(completion_id, model_name, content, decisions)
