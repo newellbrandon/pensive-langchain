@@ -33,22 +33,22 @@ The checkpointer persists graph state after every superstep (not only these four
 
 ```mermaid
 flowchart TD
-  startNode((START)) --> classify["classify_intent<br/>Classify Intent"]
+  startNode((START)) --> analyze["analyze_intent<br/>Classify Intent"]
 
-  classify -->|"intent: memory"| search["search_long_term_memory<br/>Search Long Term Memory"]
-  classify -->|"intent: general"| generate["generate_response<br/>Generate Response"]
+  analyze -->|"needs_memory"| search["search_long_term_memory<br/>Search Long Term Memory"]
+  analyze -->|"skip"| generate["generate_response<br/>Generate Response"]
 
-  search -->|store.search| agentMem[(agent_memories)]
+  search -->|"store.search · 4 types"| agentMem[(agent_memories)]
   search --> generate
 
   generate -.->|OpenAI Responses API| llmNode{{LLM}}
   generate --> save["save_memory<br/>Save Memory"]
 
-  save -->|LLM extract fact| llmNode
-  save -->|"store.put - if durable fact"| agentMem
+  save -->|"LLM extract + classify type"| llmNode
+  save -->|"store.put · typed namespace"| agentMem
   save --> endNode((END))
 
-  classify -.-> cpNote["checkpoints / checkpoint_writes"]
+  analyze -.-> cpNote["checkpoints / checkpoint_writes"]
   search -.-> cpNote
   generate -.-> cpNote
   save -.-> cpNote
@@ -63,12 +63,39 @@ flowchart TD
 | Generate Response | `respond` — no retrieved context | `respond` — uses 1 memory |
 | Save Memory | `saved` → new `agent_memories` doc | `skipped` — no new fact |
 
+## Long-Term Memory (Four Types)
+
+Pensive's long-term memory is organized into the same four types used by the
+Atlas Agent Engine memory server, all stored in the `agent_memories` collection
+under per-type namespaces on the LangGraph MongoDB Store:
+
+| Type        | Meaning                                              |
+| ----------- | ---------------------------------------------------- |
+| `semantic`  | Stable facts and preferences about the user          |
+| `episodic`  | Specific past events / interactions                  |
+| `taxonomic` | Categories or domain knowledge the user relies on    |
+| `procedural`| How the user does things (steps, output preferences) |
+
+The pipeline (ported from the leafy10 agent in `memory/memories.py`) works like this:
+
+1. **Intent planning** (`analyze_intent`) — an LLM turns the latest message into a
+   semantic search `query` and a `needs_memory` flag.
+2. **Retrieval** (`search_long_term_memory`) — vector-searches all four types,
+   drops superseded/empty facts, and reranks with Voyage (`rerank-2.5-lite`),
+   falling back to vector-score order when `VOYAGE_API_KEY` is unset.
+3. **Generation** — the dated, newest-first memory block is injected as a separate
+   system message and personalized into the reply.
+4. **Write-back** (`save_memory`) — the LLM extracts durable facts and classifies
+   each into one of the four types; a re-saved `(type, label)` supersedes the prior
+   value (last-write-wins). Enable rerank by setting `VOYAGE_API_KEY` in `.env`.
+
 ## Requirements
 
 - Python 3.13+
 - MongoDB with Vector Search (local 8.x or Atlas)
 - OpenAI-compatible LLM endpoint. Pensive speaks the OpenAI **Responses API** (`LLM_URI`, `LLM_KEY`, `LLM_MODEL`) so it works correctly with reasoning models; the final answer is read from the response's `output` message items and any model reasoning/"thinking" is discarded.
 - Voyage embeddings via MongoDB AI (`LLM_EMBEDDING_KEY`) — custom `VoyageEmbeddings` client in `utils/llm.py`
+- Optional memory rerank — set `VOYAGE_API_KEY` to enable Voyage reranking of retrieved memories; otherwise Pensive ranks by vector similarity.
 
 ## Setup
 
@@ -313,8 +340,10 @@ pensive/
 ├── config.py               # environment configuration
 ├── agent/
 │   ├── graph.py            # LangGraph workflow
-│   ├── nodes.py            # classify, search, generate, save
+│   ├── nodes.py            # analyze_intent, search, generate, save
 │   └── state.py            # AgentState schema
+├── memory/
+│   └── memories.py         # four-type memory pipeline (semantic/episodic/taxonomic/procedural)
 ├── api/
 │   ├── routes.py           # OpenAI-compatible FastAPI routes
 │   └── models.py           # request/response schemas

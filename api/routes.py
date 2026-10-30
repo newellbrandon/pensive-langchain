@@ -506,6 +506,10 @@ async def chat_completions(
         "intent": "",
         "retrieved_memories": [],
         "response": "",
+        "memory_needed": False,
+        "memory_query": "",
+        "memory_candidates": [],
+        "memory_context": [],
     }
 
     graph = app.state.graph
@@ -585,6 +589,10 @@ async def responses_completions(body: dict, http_request: Request):
         "intent": "",
         "retrieved_memories": [],
         "response": "",
+        "memory_needed": False,
+        "memory_query": "",
+        "memory_candidates": [],
+        "memory_context": [],
     }
 
     graph = app.state.graph

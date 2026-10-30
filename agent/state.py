@@ -17,3 +17,8 @@ class AgentState(TypedDict):
     intent: str
     retrieved_memories: list[dict]
     response: str
+    # Four-type long-term memory (semantic/episodic/taxonomic/procedural).
+    memory_needed: bool
+    memory_query: str
+    memory_candidates: list[dict]
+    memory_context: list[dict]

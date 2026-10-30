@@ -4,9 +4,9 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from agent.nodes import (
-    classify_intent,
+    analyze_intent,
     generate_response,
-    route_after_classify,
+    route_after_intent,
     save_memory,
     search_long_term_memory,
 )
@@ -17,15 +17,15 @@ from persistence.mongo import get_checkpointer, get_store
 def build_graph():
     """Build and compile the demo agent graph with MongoDB persistence."""
     builder = StateGraph(AgentState)
-    builder.add_node("classify_intent", classify_intent)
+    builder.add_node("analyze_intent", analyze_intent)
     builder.add_node("search_long_term_memory", search_long_term_memory)
     builder.add_node("generate_response", generate_response)
     builder.add_node("save_memory", save_memory)
 
-    builder.add_edge(START, "classify_intent")
+    builder.add_edge(START, "analyze_intent")
     builder.add_conditional_edges(
-        "classify_intent",
-        route_after_classify,
+        "analyze_intent",
+        route_after_intent,
         ["search_long_term_memory", "generate_response"],
     )
     builder.add_edge("search_long_term_memory", "generate_response")
