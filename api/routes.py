@@ -11,7 +11,12 @@ from typing import AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 
 from agent.graph import build_graph
 from api.models import ChatCompletionRequest, ChatMessage, ModelObject, ModelsListResponse
@@ -169,6 +174,51 @@ def _responses_input_text(item: dict) -> str:
                     parts.append(str(block.get("text", "")))
         return " ".join(parts)
     return str(content or "")
+
+
+def _chat_messages_to_langchain(body_messages: list) -> list[BaseMessage]:
+    """Convert a Chat Completions message list into LangChain messages, preserving
+    every role/content so the full harness context reaches the model."""
+    out: list[BaseMessage] = []
+    for message in body_messages:
+        text = _message_text(message)
+        role = message.role
+        if role == "system":
+            out.append(SystemMessage(content=text))
+        elif role == "assistant":
+            out.append(AIMessage(content=text))
+        elif role == "user":
+            out.append(HumanMessage(content=text))
+        else:
+            out.append(HumanMessage(content=f"[{role}] {text}" if text else text))
+    return out
+
+
+def _responses_input_messages(body: dict) -> list[BaseMessage]:
+    """Convert a Responses API request (instructions + input items) into
+    LangChain messages, preserving the full context."""
+    out: list[BaseMessage] = []
+    instructions = body.get("instructions")
+    if instructions:
+        out.append(SystemMessage(content=str(instructions)))
+    raw = body.get("input")
+    if isinstance(raw, str):
+        out.append(HumanMessage(content=raw))
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role") or "user"
+            text = _responses_input_text(item)
+            if role == "system":
+                out.append(SystemMessage(content=text))
+            elif role == "assistant":
+                out.append(AIMessage(content=text))
+            elif role == "user":
+                out.append(HumanMessage(content=text))
+            else:
+                out.append(HumanMessage(content=f"[{role}] {text}" if text else text))
+    return out
 
 
 def _responses_latest_user_query(body: dict) -> str:
@@ -501,6 +551,7 @@ async def chat_completions(
     }
     input_state = {
         "messages": [HumanMessage(content=user_query)],
+        "prompt_messages": _chat_messages_to_langchain(body.messages),
         "decisions": [],
         "user_id": user_id,
         "intent": "",
@@ -584,6 +635,7 @@ async def responses_completions(body: dict, http_request: Request):
     }
     input_state = {
         "messages": [HumanMessage(content=user_query)],
+        "prompt_messages": _responses_input_messages(body),
         "decisions": [],
         "user_id": user_id,
         "intent": "",

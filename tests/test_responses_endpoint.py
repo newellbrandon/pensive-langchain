@@ -13,7 +13,11 @@ from api.routes import (
     _responses_delta_chunk,
     _responses_completed,
     _assemble_content,
+    _chat_messages_to_langchain,
+    _responses_input_messages,
 )
+from api.models import ChatMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import json
 
 
@@ -89,3 +93,38 @@ class TestAssembleContent:
     def test_no_workflow_header_without_decisions(self):
         content = _assemble_content({"response": "Just an answer"}, [])
         assert content == "Just an answer"
+
+
+class TestContextPreservation:
+    def test_chat_messages_preserve_all_roles(self):
+        msgs = [
+            ChatMessage(role="system", content="You edit code."),
+            ChatMessage(role="user", content="Fix the bug"),
+            ChatMessage(role="assistant", content="I will add a test."),
+            ChatMessage(role="tool", content="contents of /tmp/file.py"),
+        ]
+        converted = _chat_messages_to_langchain(msgs)
+        assert isinstance(converted[0], SystemMessage)
+        assert converted[0].content == "You edit code."
+        assert isinstance(converted[1], HumanMessage)
+        assert converted[1].content == "Fix the bug"
+        assert isinstance(converted[2], AIMessage)
+        assert converted[2].content == "I will add a test."
+        assert isinstance(converted[3], HumanMessage)
+        assert "contents of /tmp/file.py" in converted[3].content
+
+    def test_responses_input_preserves_instructions_and_roles(self):
+        body = {
+            "instructions": "You are a coding agent.",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "fix it"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+            ],
+        }
+        converted = _responses_input_messages(body)
+        assert isinstance(converted[0], SystemMessage)
+        assert converted[0].content == "You are a coding agent."
+        assert isinstance(converted[1], HumanMessage)
+        assert converted[1].content == "fix it"
+        assert isinstance(converted[2], AIMessage)
+        assert converted[2].content == "done"

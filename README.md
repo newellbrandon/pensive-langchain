@@ -63,6 +63,21 @@ flowchart TD
 | Generate Response | `respond` — no retrieved context | `respond` — uses 1 memory |
 | Save Memory | `saved` → new `agent_memories` doc | `skipped` — no new fact |
 
+## Coding-Harness / Persistent-Memory Context
+
+Pensive can serve as an OpenAI-compatible model for a coding harness (e.g. OpenCode)
+while providing persistent memory for important context:
+
+- **Full context is honored.** Every incoming request's messages (system prompt,
+  conversation history, tool results) are passed through to the model; Pensive does
+  not discard anything the client sends.
+- **Persistent memory runs on top.** The four-type long-term memory pipeline
+  retrieves and injects remembered context, and persists durable facts — scoped by
+  `user_id` — so they carry across sessions, chats, and workflows.
+- Connect any OpenAI chat/responses client to `http://<host>:8000/v1` with model
+  `pensive` (see [OpenWebUI Configuration](#openwebui-configuration) and the OpenCode
+  provider config in the OpenCode docs).
+
 ## Long-Term Memory (Four Types)
 
 Pensive's long-term memory is organized into the same four types used by the

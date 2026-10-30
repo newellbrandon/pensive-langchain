@@ -147,3 +147,25 @@ class TestResponsesClient:
         assert client._url == "https://g.example/v1/responses"
         assert client._api_key == "k"
         assert client._model == "m"
+
+    def test_preserves_tool_and_unknown_role_content(self):
+        from langchain_core.messages import ToolMessage
+
+        payload = _sample_response("ok", with_reasoning=False)
+        session, factory = _fake_http(payload)
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", factory):
+            _run(
+                client.agenerate(
+                    [
+                        HumanMessage(content="check the file"),
+                        ToolMessage(content="<file contents>", tool_call_id="call_1"),
+                    ]
+                )
+            )
+
+        body = session.post.await_args.kwargs["json"]
+        texts = [i["content"][0]["text"] for i in body["input"]]
+        assert any("tool" in t for t in texts)
+        assert any("<file contents>" in t for t in texts)
