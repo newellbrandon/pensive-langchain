@@ -1,0 +1,72 @@
+"""Tests for the OpenAI Responses API endpoint (POST /v1/responses).
+
+covers:
+- extracting the latest user query from Responses `input` (items or raw string)
+- building a Responses `response` object (message / output_text item)
+- streaming SSE events (response.output_text.delta + response.completed)
+"""
+from __future__ import annotations
+
+from api.routes import (
+    _responses_latest_user_query,
+    _build_responses_response,
+    _responses_delta_chunk,
+    _responses_completed,
+)
+import json
+
+
+def _item(role: str, text: str) -> dict:
+    return {
+        "role": role,
+        "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}],
+    }
+
+
+class TestResponsesUserQuery:
+    def test_extracts_last_user_text_from_items(self):
+        body = {"input": [_item("user", "first"), _item("assistant", "a"), _item("user", "second?")]}
+        assert _responses_latest_user_query(body) == "second?"
+
+    def test_accepts_raw_string_input(self):
+        assert _responses_latest_user_query({"input": "hello there"}) == "hello there"
+
+    def test_empty_when_no_user(self):
+        assert _responses_latest_user_query({"input": [_item("assistant", "hi")]}) == ""
+        assert _responses_latest_user_query({"input": []}) == ""
+
+
+class TestResponsesObject:
+    def test_message_output_item_shape(self):
+        resp = _build_responses_response(
+            "resp_abc", "pensive", "Remember that MongoDB is my favorite database"
+        )
+        assert resp["id"] == "resp_abc"
+        assert resp["object"] == "response"
+        assert resp["status"] == "completed"
+        assert resp["model"] == "pensive"
+        assert len(resp["output"]) == 1
+        item = resp["output"][0]
+        assert item["type"] == "message"
+        assert item["role"] == "assistant"
+        assert item["phase"] == "final_answer"
+        assert item["content"][0]["type"] == "output_text"
+        assert item["content"][0]["text"] == "Remember that MongoDB is my favorite database"
+
+
+class TestResponsesStreaming:
+    def test_delta_chunk_is_output_text_delta(self):
+        line = _responses_delta_chunk("resp_abc", "Hello")
+        assert line.startswith("data: ")
+        event = json.loads(line[len("data: "):])
+        assert event["type"] == "response.output_text.delta"
+        assert event["item_id"] == "resp_abc"
+        assert event["delta"] == "Hello"
+
+    def test_completed_event_embeds_final_response(self):
+        line = _responses_completed("resp_abc", "pensive", "final!")
+        event = json.loads(line[len("data: "):])
+        assert event["type"] == "response.completed"
+        assert event["response"]["object"] == "response"
+        text = event["response"]["output"][0]["content"][0]["text"]
+        assert text == "final!"

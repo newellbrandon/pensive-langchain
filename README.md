@@ -13,6 +13,8 @@ The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.ope
 
 OpenWebUI sends chat requests to the FastAPI layer, which invokes a compiled LangGraph workflow. MongoDB holds short-term thread state (checkpointer) and long-term facts (store with vector search).
 
+Pensive exposes both OpenAI-compatible protocols: **Chat Completions** (`POST /v1/chat/completions`) and the **Responses API** (`POST /v1/responses`). OpenWebUI can be pointed at either connection type.
+
 ```mermaid
 flowchart TD
   owui[OpenWebUI] -->|POST /v1/chat/completions| api[FastAPI]
@@ -213,6 +215,8 @@ In OpenWebUI → **Settings → Connections → OpenAI**:
 | API Key | any non-empty string    |
 | Model   | `pensive`               |
 
+Connection type: **Chat Completions** (default) or **Responses** — pensive serves both `POST /v1/chat/completions` and `POST /v1/responses`.
+
 On the OpenWebUI server, enable session header forwarding so Pensive receives the logged-in user and chat context:
 
 ```bash
@@ -283,6 +287,7 @@ Session 2 demonstrates **long-term memory**: the fact persisted in MongoDB (`age
 | `GET /health`               | Liveness check (503 if MongoDB down) |
 | `GET /v1/models`            | Lists model `pensive`                |
 | `POST /v1/chat/completions` | Chat (supports `stream: true`)       |
+| `POST /v1/responses`        | OpenAI **Responses API** chat (supports `stream: true`) |
 
 
 ### Example (streaming)
