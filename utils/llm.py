@@ -5,21 +5,109 @@ from typing import List
 
 import httpx
 from langchain_core.embeddings import Embeddings
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage
 from langsmith import traceable
 
 from config import Config
 
 
-def get_chat_model() -> ChatOpenAI:
-    """Return a Grove-configured OpenAI-compatible chat model."""
-    return ChatOpenAI(
+class ResponsesClient:
+    """Minimal async client for the OpenAI Responses API.
+
+    The AI gateway exposes a reasoning model (e.g. ``gpt-5.6-luna``) via the
+    Responses API. ``ChatOpenAI`` cannot be used here because it only speaks
+    Chat Completions and posts to the wrong pathway for a ``/responses`` URI.
+
+    The final assistant answer lives in ``output[].content[].text`` on message
+    items (``phase == "final_answer"``); reasoning/"thinking" items are
+    intentionally ignored so only the real answer reaches the caller.
+    """
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        api_key: str,
+        model: str,
+        max_output_tokens: int = 1024,
+        timeout: float = 120.0,
+    ) -> None:
+        self._url = url
+        self._api_key = api_key
+        self._model = model
+        self._max_output_tokens = max_output_tokens
+        self._timeout = timeout
+
+    def _message_text(self, message: BaseMessage) -> str:
+        content = message.content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+            return " ".join(parts)
+        return str(content)
+
+    async def agenerate(self, messages: List[BaseMessage]) -> str:
+        """POST messages to the Responses API and return the final answer text."""
+        instructions: List[str] = []
+        input_items: list[dict] = []
+
+        for message in messages:
+            text = self._message_text(message)
+            role = getattr(message, "type", "")
+            if role == "system":
+                instructions.append(text)
+            elif role in ("human", "user"):
+                input_items.append(
+                    {"role": "user", "content": [{"type": "input_text", "text": text}]}
+                )
+            elif role in ("ai", "assistant"):
+                input_items.append(
+                    {"role": "assistant", "content": [{"type": "output_text", "text": text}]}
+                )
+
+        payload: dict = {
+            "model": self._model,
+            "input": input_items,
+            "max_output_tokens": self._max_output_tokens,
+        }
+        if instructions:
+            payload["instructions"] = "\n".join(instructions)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(self._url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        return self._extract_answer(data)
+
+    @staticmethod
+    def _extract_answer(data: dict) -> str:
+        """Return the concatenated final-answer text, ignoring reasoning items."""
+        parts: List[str] = []
+        for item in data.get("output") or []:
+            if item.get("type") != "message":
+                continue
+            for part in item.get("content") or []:
+                if part.get("type") == "output_text":
+                    parts.append(str(part.get("text", "")))
+        return "".join(parts)
+
+
+def get_responses_client() -> ResponsesClient:
+    """Return an async client for the configured AI gateway Responses API."""
+    return ResponsesClient(
+        url=Config.responses_url(),
+        api_key=Config.LLM_KEY,
         model=Config.LLM_MODEL,
-        openai_api_base=Config.openai_base_url(),
-        # Grove authenticates via the api-key header, not Authorization Bearer.
-        openai_api_key="not-used-by-grove",
-        default_headers={"api-key": Config.LLM_KEY},
-        max_tokens=1024,
     )
 
 

@@ -13,7 +13,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 
 from agent.state import AgentState
-from utils.llm import get_chat_model
+from utils.llm import get_responses_client
 
 logger = logging.getLogger(__name__)
 
@@ -120,17 +120,14 @@ async def generate_response(state: AgentState) -> dict:
         f"Generating answer using {len(memories)} memories.",
     )
 
-    model = get_chat_model()
+    client = get_responses_client()
     try:
-        response = await model.ainvoke(
+        content = await client.agenerate(
             [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=query),
             ]
         )
-        content = response.content
-        if not isinstance(content, str):
-            content = str(content)
         reason = f"Generated answer ({len(content)} chars)."
     except Exception as exc:
         logger.error("LLM generation failed: %s", type(exc).__name__)
@@ -172,11 +169,11 @@ async def save_memory(state: AgentState, runtime: Runtime) -> dict:
             ]
         }
 
-    model = get_chat_model()
+    client = get_responses_client()
     save = False
     content = ""
     try:
-        extraction = await model.ainvoke(
+        raw = await client.agenerate(
             [
                 SystemMessage(
                     content=(
@@ -189,7 +186,6 @@ async def save_memory(state: AgentState, runtime: Runtime) -> dict:
                 HumanMessage(content=query),
             ]
         )
-        raw = extraction.content if isinstance(extraction.content, str) else str(extraction.content)
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         payload = json.loads(match.group(0) if match else raw)
         save = bool(payload.get("save"))

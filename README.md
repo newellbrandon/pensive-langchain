@@ -39,7 +39,7 @@ flowchart TD
   search -->|store.search| agentMem[(agent_memories)]
   search --> generate
 
-  generate -->|ChatOpenAI| llmNode{{LLM}}
+  generate -.->|OpenAI Responses API| llmNode{{LLM}}
   generate --> save["save_memory<br/>Save Memory"]
 
   save -->|LLM extract fact| llmNode
@@ -65,7 +65,7 @@ flowchart TD
 
 - Python 3.13+
 - MongoDB with Vector Search (local 8.x or Atlas)
-- OpenAI-compatible LLM endpoint (`LLM_URI`, `LLM_KEY`)
+- OpenAI-compatible LLM endpoint. Pensive speaks the OpenAI **Responses API** (`LLM_URI`, `LLM_KEY`, `LLM_MODEL`) so it works correctly with reasoning models; the final answer is read from the response's `output` message items and any model reasoning/"thinking" is discarded.
 - Voyage embeddings via MongoDB AI (`LLM_EMBEDDING_KEY`) — custom `VoyageEmbeddings` client in `utils/llm.py`
 
 ## Setup
@@ -173,7 +173,7 @@ LangSmith tracing is optional and controlled by environment variables in `.env`:
 | `LANGSMITH_ENDPOINT` | API endpoint (default: `https://api.smith.langchain.com`) |
 | `USER_ID` | Optional fallback when not using OpenWebUI session headers |
 
-When `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` is set, traces appear at [smith.langchain.com](https://smith.langchain.com) under the configured project. Each chat request produces a top-level run with tags `pensive` and `chat`, `metadata.user_id` from the OpenWebUI user, plus `chat_id` / `session_id` when forwarded, including nested LangGraph node spans, `ChatOpenAI` LLM calls, and `voyage_embed` embedding spans during memory search.
+When `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` is set, traces appear at [smith.langchain.com](https://smith.langchain.com) under the configured project. Each chat request produces a top-level run with tags `pensive` and `chat`, `metadata.user_id` from the OpenWebUI user, plus `chat_id` / `session_id` when forwarded, including nested LangGraph node spans, OpenAI Responses API LLM calls, and `voyage_embed` embedding spans during memory search.
 
 If tracing is disabled or the API key is missing, the API starts normally without reporting to LangSmith.
 
@@ -316,7 +316,7 @@ pensive/
 ├── persistence/
 │   └── mongo.py            # MongoDBSaver + MongoDBStore
 ├── utils/
-│   └── llm.py              # ChatOpenAI helper
+│   └── llm.py              # OpenAI Responses API + Voyage embeddings clients
 └── scripts/
     └── setup_memory_index.py
 ```

@@ -92,6 +92,18 @@ class Config:
             return uri[: -len("/chat/completions")]
         return uri
 
+    @classmethod
+    def responses_url(cls) -> str:
+        """Derive the OpenAI Responses API endpoint from LLM_URI.
+
+        Accepts either a bare base URL (``…/v1``) or one that already ends in
+        ``/responses`` and normalizes to the full endpoint path.
+        """
+        uri = cls.LLM_URI.rstrip("/")
+        if uri.endswith("/responses"):
+            return uri
+        return f"{uri}/responses"
+
 
 def configure_langsmith() -> bool:
     """Enable LangSmith tracing when configured. Returns whether tracing is active."""
