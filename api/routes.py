@@ -330,24 +330,30 @@ def _workflow_metadata(decisions: list[dict]) -> dict[str, str]:
         return {}
     return {"workflow": json.dumps(decisions)}
 
+_THOUGHT_HEADER = "**Workflow decisions for this query:**"
+
+
+def _decision_line(event: dict) -> str:
+    """One rendered decision line for the reasoning/thought text."""
+    step = event.get("step", "step")
+    decision = event.get("decision", "")
+    reason = event.get("reason", "")
+    label = step.replace("_", " ").title()
+    line = f"- {label}: {decision}"
+    if reason:
+        line += f" — {reason}"
+    return line
+
+
 def _workflow_thought_text(decisions: list[dict]) -> str:
     """Format current-turn decisions as reasoning/thought text.
 
     Emitted on the native reasoning channel (Responses ``reasoning`` item /
     chat ``reasoning_content``) so OpenAI-compatible clients render it as a
-    collapsible thought block — never as part of the final answer.
+    collapsible thought block — never as part of the final answer. The bold
+    header doubles as the thought's title in OpenCode's timeline.
     """
-    lines = ["Workflow decisions for this query:"]
-    for event in decisions:
-        step = event.get("step", "step")
-        decision = event.get("decision", "")
-        reason = event.get("reason", "")
-        label = step.replace("_", " ").title()
-        line = f"- {label}: {decision}"
-        if reason:
-            line += f" — {reason}"
-        lines.append(line)
-    return "\n".join(lines)
+    return "\n".join([_THOUGHT_HEADER, *(_decision_line(d) for d in decisions)])
 
 def _reasoning_item(completion_id: str, text: str, in_progress: bool = False) -> dict:
     """Build a Responses API ``reasoning`` output item carrying the thought."""
@@ -382,6 +388,7 @@ async def _stream_responses(
     """
     final_state: dict = {}
     decisions: list[dict] = []
+    reasoning_started = False
 
     try:
         async for mode, chunk in graph.astream(
@@ -391,6 +398,15 @@ async def _stream_responses(
         ):
             if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
                 decisions.append(chunk)
+                if not reasoning_started:
+                    # Open the reasoning item and stream the thought header the
+                    # moment the first decision arrives — live, mid-run.
+                    yield _responses_output_item_added(
+                        completion_id, _reasoning_item(completion_id, "", in_progress=True)
+                    )
+                    yield _responses_reasoning_delta(completion_id, _THOUGHT_HEADER)
+                    reasoning_started = True
+                yield _responses_reasoning_delta(completion_id, _decision_line(chunk))
             elif mode == "values" and isinstance(chunk, dict):
                 final_state = chunk
     except Exception as exc:
@@ -403,14 +419,9 @@ async def _stream_responses(
 
     content = _final_answer(final_state)
 
-    # Reasoning channel: workflow decisions as a thought block.
     if decisions:
+        # Close the reasoning item with its complete thought text.
         thought = _workflow_thought_text(decisions)
-        yield _responses_output_item_added(
-            completion_id, _reasoning_item(completion_id, "", in_progress=True)
-        )
-        for piece in _word_pieces(thought):
-            yield _responses_reasoning_delta(completion_id, piece)
         yield _responses_reasoning_done(completion_id, thought)
         yield _responses_output_item_done(
             completion_id, _reasoning_item(completion_id, thought)
@@ -535,12 +546,13 @@ async def _stream_graph(
 ) -> AsyncIterator[str]:
     """Stream the model's final answer (chat completions SSE).
 
-    Workflow decisions are streamed first as ``delta.reasoning_content``
-    (rendered as a thought block by OpenAI-compatible clients); the answer is
-    the only ``content``.
+    Workflow decisions stream live as ``delta.reasoning_content`` the moment
+    the graph emits them (rendered as a streaming thought block); the answer
+    is the only ``content``.
     """
     final_state: dict = {}
     decisions: list[dict] = []
+    reasoning_started = False
 
     try:
         async for mode, chunk in graph.astream(
@@ -550,6 +562,12 @@ async def _stream_graph(
         ):
             if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "decision":
                 decisions.append(chunk)
+                if not reasoning_started:
+                    yield _reasoning_chunk(
+                        completion_id, model, _THOUGHT_HEADER, role=True
+                    )
+                    reasoning_started = True
+                yield _reasoning_chunk(completion_id, model, _decision_line(chunk))
             elif mode == "values" and isinstance(chunk, dict):
                 final_state = chunk
     except Exception as exc:
@@ -564,12 +582,7 @@ async def _stream_graph(
 
     answer = _final_answer(final_state)
 
-    if decisions:
-        thought = _workflow_thought_text(decisions)
-        pieces = _word_pieces(thought)
-        for index, piece in enumerate(pieces):
-            yield _reasoning_chunk(completion_id, model, piece, role=(index == 0))
-    else:
+    if not reasoning_started:
         yield _role_chunk(completion_id, model)
 
     if answer:

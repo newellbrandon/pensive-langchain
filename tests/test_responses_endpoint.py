@@ -218,6 +218,75 @@ class TestThoughtRendering:
         assert "reasoning_content" not in message
         assert "workflow" not in payload
 
+    def test_chat_stream_streams_decisions_live(self):
+        event = asyncio.Event()
+        probe = _LiveProbeGraph(
+            [{"step": "classify_intent", "decision": "general", "reason": "first"}],
+            {"response": "Final answer"},
+            event,
+        )
+
+        async def collect(agen):
+            chunks = []
+            async for chunk in agen:
+                chunks.append(chunk)
+                if b"reasoning_content" in chunk.encode():
+                    event.set()
+            return chunks
+
+        chunks = asyncio.run(collect(_stream_graph(probe, {}, {}, "chatcmpl_1", "pensive")))
+        assert not probe.timed_out, "decision deltas must be streamed while the graph is running"
+
+        deltas = []
+        for chunk in chunks:
+            for line in chunk.split("\n\n"):
+                if not line.startswith("data: "):
+                    continue
+                data = line[len("data: "):].strip()
+                if data == "[DONE]":
+                    continue
+                for choice in json.loads(data).get("choices") or []:
+                    if isinstance(choice.get("delta"), dict):
+                        deltas.append(choice["delta"])
+        reasoning = [d.get("reasoning_content", "") for d in deltas if d.get("reasoning_content")]
+        content = "".join(d.get("content", "") or "" for d in deltas)
+        assert "Classify Intent" in "".join(reasoning)
+        assert content == "Final answer"
+
+    def test_stream_responses_streams_decisions_live(self):
+        event = asyncio.Event()
+        probe = _LiveProbeGraph(
+            [{"step": "classify_intent", "decision": "general", "reason": "first"}],
+            {"response": "Final answer"},
+            event,
+        )
+
+        async def collect(agen):
+            chunks = []
+            async for chunk in agen:
+                chunks.append(chunk)
+                if b"response.reasoning_summary_text.delta" in chunk.encode():
+                    event.set()
+            return chunks
+
+        chunks = asyncio.run(collect(_stream_responses(probe, {}, {}, "resp_1", "pensive")))
+        assert not probe.timed_out, "decision deltas must be streamed while the graph is running"
+
+        events = []
+        for chunk in chunks:
+            if not chunk.startswith("data: "):
+                continue
+            line = chunk[len("data: "):].strip()
+            if line == "[DONE]":
+                continue
+            events.append(json.loads(line))
+        thought = "".join(
+            e["delta"] for e in events if e["type"] == "response.reasoning_summary_text.delta"
+        )
+        assert "Classify Intent" in thought
+        answer = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
+        assert answer == "Final answer"
+
     def test_chat_stream_emits_reasoning_content_then_content(self):
         graph = _FakeGraph(self.DECISIONS, {"response": "Yes — done."})
         chunks = asyncio.run(_collect(_stream_graph(graph, {}, {}, "chatcmpl_1", "pensive")))
@@ -253,6 +322,33 @@ class _FakeGraph:
     async def astream(self, input_state, config=None, stream_mode=None):
         for decision in self._decisions:
             yield ("custom", {"type": "decision", **decision})
+        yield ("values", self._final_state)
+
+
+class _LiveProbeGraph:
+    """Proves decisions are streamed while the graph is still running.
+
+    After yielding a decision event, the graph waits for the stream consumer to
+    receive that decision's reasoning delta before continuing. A buffering
+    implementation (which only emits after the graph finishes) deadlocks the
+    probe and sets ``timed_out``.
+    """
+
+    def __init__(self, decisions, final_state, saw_delta):
+        self._decisions = decisions
+        self._final_state = final_state
+        self._saw_delta = saw_delta  # asyncio.Event set by the consumer
+        self.timed_out = False
+
+    async def astream(self, input_state, config=None, stream_mode=None):
+        for decision in self._decisions:
+            self._saw_delta.clear()
+            yield ("custom", {"type": "decision", **decision})
+            try:
+                await asyncio.wait_for(self._saw_delta.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                self.timed_out = True
+                break
         yield ("values", self._final_state)
 
 
