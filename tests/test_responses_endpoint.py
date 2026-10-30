@@ -25,7 +25,7 @@ from api.models import ChatMessage
 from config import Config
 from fastapi import Request as FastAPIRequest
 from starlette.datastructures import Headers
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 import asyncio
 import json
 
@@ -99,6 +99,12 @@ class TestFinalResponsePurity:
     def test_answer_falls_back_to_last_message(self):
         final_state = {"messages": [AIMessage(content="fallback answer")]}
         assert _final_answer(final_state) == "fallback answer"
+
+    def test_answer_is_empty_for_tool_call_turns(self):
+        # A tool-only assistant turn has no answer text; it must not fall back
+        # to the stringified message object.
+        final_state = {"response": "", "messages": [AIMessage(content="")]}
+        assert _final_answer(final_state) == ""
 
     def test_no_workflow_text_without_decisions(self):
         assert _final_answer({"response": "Just an answer"}) == "Just an answer"
@@ -390,6 +396,167 @@ class TestStreamingPurity:
         assert message["content"][0]["text"] == "Yes — done."
 
 
+class TestToolCallRelay:
+    TOOL_CALLS = [{"id": "call_1", "name": "read", "arguments": '{"path": "README.md"}'}]
+
+    def test_chat_message_carries_tool_calls(self):
+        payload = _build_chat_completion(
+            "chatcmpl_1",
+            "pensive",
+            "",
+            [],
+            user_query="read the file",
+            tool_calls=self.TOOL_CALLS,
+        )
+        message = payload["choices"][0]["message"]
+        assert message["tool_calls"] == [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read", "arguments": '{"path": "README.md"}'},
+            }
+        ]
+        assert payload["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_responses_output_includes_function_call_item(self):
+        resp = _build_responses_response(
+            "resp_1", "pensive", "", decisions=[], tool_calls=self.TOOL_CALLS
+        )
+        first = resp["output"][0]
+        assert first["type"] == "function_call"
+        assert first["call_id"] == "call_1"
+        assert first["name"] == "read"
+        assert first["arguments"] == '{"path": "README.md"}'
+        assert first["status"] == "completed"
+        assert resp["output"][1]["type"] == "message"
+
+    def test_chat_stream_emits_tool_call_deltas(self):
+        graph = _FakeGraph([], {"response": "", "tool_calls": self.TOOL_CALLS})
+        chunks = asyncio.run(_collect(_stream_graph(graph, {}, {}, "chatcmpl_1", "pensive")))
+
+        deltas = []
+        finish_reasons = []
+        for chunk in chunks:
+            for line in chunk.split("\n\n"):
+                if not line.startswith("data: "):
+                    continue
+                data = line[len("data: "):].strip()
+                if data == "[DONE]":
+                    continue
+                event = json.loads(data)
+                for choice in event.get("choices") or []:
+                    if isinstance(choice.get("delta"), dict):
+                        deltas.append(choice["delta"])
+                    if choice.get("finish_reason"):
+                        finish_reasons.append(choice["finish_reason"])
+
+        tool_chunks = [d for d in deltas if d.get("tool_calls")]
+        assert tool_chunks, "must stream tool_calls deltas"
+        assert tool_chunks[0]["tool_calls"][0]["id"] == "call_1"
+        assert tool_chunks[0]["tool_calls"][0]["function"]["name"] == "read"
+        arguments = "".join(
+            c["tool_calls"][0]["function"].get("arguments", "")
+            for c in tool_chunks
+        )
+        assert arguments == '{"path": "README.md"}'
+        assert finish_reasons and finish_reasons[-1] == "tool_calls"
+        # no answer text was streamed
+        assert "".join(d.get("content", "") or "" for d in deltas) == ""
+
+    def test_stream_responses_emits_function_call_events(self):
+        graph = _FakeGraph([], {"response": "", "tool_calls": self.TOOL_CALLS})
+        chunks = asyncio.run(_collect(_stream_responses(graph, {}, {}, "resp_1", "pensive")))
+
+        events = []
+        for chunk in chunks:
+            if not chunk.startswith("data: "):
+                continue
+            line = chunk[len("data: "):].strip()
+            if line == "[DONE]":
+                continue
+            events.append(json.loads(line))
+
+        types = [e["type"] for e in events]
+        assert "response.output_item.added" in types
+        added = next(e for e in events if e["type"] == "response.output_item.added")
+        assert added["item"]["type"] == "function_call"
+        assert added["item"]["name"] == "read"
+        arguments = "".join(
+            e["delta"]
+            for e in events
+            if e["type"] == "response.function_call_arguments.delta"
+        )
+        assert arguments == '{"path": "README.md"}'
+        assert any(e["type"] == "response.function_call_arguments.done" for e in events)
+
+        completed = next(e for e in events if e["type"] == "response.completed")
+        assert completed["response"]["output"][0]["type"] == "function_call"
+
+    def test_chat_messages_preserve_tool_calls_and_results(self):
+        msgs = [
+            ChatMessage(role="user", content="read the file"),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": '{"path": "README.md"}'},
+                    }
+                ],
+            ),
+            ChatMessage(role="tool", content="first line: # Pensive", tool_call_id="call_1"),
+        ]
+        converted = _chat_messages_to_langchain(msgs)
+        assistant = converted[1]
+        assert assistant.tool_calls[0]["id"] == "call_1"
+        assert assistant.tool_calls[0]["name"] == "read"
+        assert assistant.tool_calls[0]["args"] == {"path": "README.md"}
+        assert converted[2].tool_call_id == "call_1"
+        assert converted[2].content == "first line: # Pensive"
+
+    def test_chat_messages_allow_null_content_tool_call_turn(self):
+        # OpenCode sends assistant tool-call turns with content: null.
+        msgs = [
+            ChatMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{}"},
+                    }
+                ],
+            ),
+            ChatMessage(role="tool", content="<file contents>", tool_call_id="call_1"),
+        ]
+        converted = _chat_messages_to_langchain(msgs)
+        assert converted[0].content == ""
+        assert converted[0].tool_calls[0]["name"] == "read"
+        assert converted[0].tool_calls[0]["args"] == {}
+        assert converted[1].tool_call_id == "call_1"
+
+    def test_responses_input_preserves_function_call_output(self):
+        body = {
+            "input": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "function_call", "call_id": "call_1", "name": "read", "arguments": '{"path": "a"}'}
+                    ],
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "contents"},
+            ]
+        }
+        converted = _responses_input_messages(body)
+        assert converted[0].tool_calls[0]["id"] == "call_1"
+        assert converted[0].tool_calls[0]["name"] == "read"
+        assert converted[1].tool_call_id == "call_1"
+        assert converted[1].content == "contents"
+
+
 class TestContextPreservation:
     def test_fails_open_to_default_user(self, monkeypatch):
         from api.models import ChatCompletionRequest
@@ -424,8 +591,8 @@ class TestContextPreservation:
         assert converted[1].content == "Fix the bug"
         assert isinstance(converted[2], AIMessage)
         assert converted[2].content == "I will add a test."
-        assert isinstance(converted[3], HumanMessage)
-        assert "contents of /tmp/file.py" in converted[3].content
+        assert isinstance(converted[3], ToolMessage)
+        assert converted[3].content == "contents of /tmp/file.py"
 
     def test_responses_input_preserves_instructions_and_roles(self):
         body = {

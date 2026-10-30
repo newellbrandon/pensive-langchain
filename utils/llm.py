@@ -1,7 +1,9 @@
 """LLM and embedding helpers."""
 from __future__ import annotations
 
-from typing import List
+import json
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import httpx
 from langchain_core.embeddings import Embeddings
@@ -9,6 +11,14 @@ from langchain_core.messages import BaseMessage
 from langsmith import traceable
 
 from config import Config
+
+
+@dataclass
+class GenerationResult:
+    """Result of a Responses API completion: answer text + tool calls."""
+
+    text: str = ""
+    tool_calls: list[dict] = field(default_factory=list)
 
 
 class ResponsesClient:
@@ -50,35 +60,110 @@ class ResponsesClient:
             return " ".join(parts)
         return str(content)
 
-    async def agenerate(self, messages: List[BaseMessage]) -> str:
-        """POST messages to the Responses API and return the final answer text."""
-        instructions: List[str] = []
+    @staticmethod
+    def _normalize_tools(tools: Optional[list]) -> list[dict]:
+        """Accept OpenAI Chat (``function`` wrapper) or Responses tool format."""
+        normalized: list[dict] = []
+        for tool in tools or []:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+                fn = tool["function"]
+                entry: dict = {
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", "") or "",
+                    "parameters": fn.get("parameters") or {},
+                }
+                strict = fn.get("strict")
+                if strict is not None:
+                    entry["strict"] = strict
+                normalized.append(entry)
+            elif tool.get("type") == "function" and tool.get("name"):
+                normalized.append(dict(tool))
+        return normalized
+
+    def _build_input_items(self, messages: List[BaseMessage]) -> tuple[list[dict], list[str]]:
+        """Convert LangChain messages into Responses API input items.
+
+        Preserves the harness contract exactly: assistant tool calls replay as
+        ``function_call`` content blocks and tool results as
+        ``function_call_output`` items (with their ``call_id`` pairings), so a
+        multi-turn tool conversation remains coherent for the upstream model.
+        """
         input_items: list[dict] = []
+        instructions: list[str] = []
 
         for message in messages:
             text = self._message_text(message)
             role = getattr(message, "type", "")
+
             if role == "system":
                 if text:
                     instructions.append(text)
-            elif role in ("human", "user"):
+                continue
+
+            if role in ("human", "user"):
                 if text:
                     input_items.append(
                         {"role": "user", "content": [{"type": "input_text", "text": text}]}
                     )
-            elif role in ("ai", "assistant"):
-                # Skip empty assistant turns (e.g. tool-call-only messages); the
-                # tool results that follow carry the observable content.
+                continue
+
+            if role == "tool":
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": getattr(message, "tool_call_id", None) or "",
+                        "output": text,
+                    }
+                )
+                continue
+
+            if role in ("ai", "assistant"):
                 if text:
                     input_items.append(
                         {"role": "assistant", "content": [{"type": "output_text", "text": text}]}
                     )
-            elif text:
-                # Preserve anything else (tool results, developer notes) so full
-                # request context is never dropped by the harness.
+                # Tool calls replay as TOP-LEVEL function_call input items:
+                # the AI gateway rejects function_call content blocks inside
+                # assistant messages and validates that every output is paired
+                # with a matching call.
+                for call in getattr(message, "tool_calls", None) or []:
+                    arguments = call.get("args")
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments)
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call.get("id") or "",
+                            "name": call.get("name") or "",
+                            "arguments": arguments or "{}",
+                            "status": "completed",
+                        }
+                    )
+                continue
+
+            if text:
+                # Preserve anything else (developer notes) so full request
+                # context is never dropped by the harness.
                 input_items.append(
                     {"role": "user", "content": [{"type": "input_text", "text": f"[{role}] {text}"}]}
                 )
+
+        return input_items, instructions
+
+    async def acomplete(
+        self,
+        messages: List[BaseMessage],
+        tools: Optional[list] = None,
+        tool_choice: Optional[dict] = None,
+    ) -> GenerationResult:
+        """POST messages (+ optional tools) to the Responses API.
+
+        Returns the final answer text and any ``function_call`` output items.
+        """
+        input_items, instructions = self._build_input_items(messages)
 
         payload: dict = {
             "model": self._model,
@@ -87,6 +172,11 @@ class ResponsesClient:
         }
         if instructions:
             payload["instructions"] = "\n".join(instructions)
+        normalized_tools = self._normalize_tools(tools)
+        if normalized_tools:
+            payload["tools"] = normalized_tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
         headers = {
             "Content-Type": "application/json",
@@ -95,10 +185,27 @@ class ResponsesClient:
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(self._url, json=payload, headers=headers)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                # Surface the upstream error body (the gateway's message is the
+                # only way to diagnose rejected payloads).
+                raise httpx.HTTPStatusError(
+                    f"Upstream Responses API {response.status_code}: {response.text[:500]}",
+                    request=response.request,
+                    response=response,
+                ) from None
             data = response.json()
 
-        return self._extract_answer(data)
+        return GenerationResult(
+            text=self._extract_answer(data),
+            tool_calls=self._extract_tool_calls(data),
+        )
+
+    async def agenerate(self, messages: List[BaseMessage]) -> str:
+        """POST messages to the Responses API and return the final answer text."""
+        result = await self.acomplete(messages)
+        return result.text
 
     @staticmethod
     def _extract_answer(data: dict) -> str:
@@ -111,6 +218,22 @@ class ResponsesClient:
                 if part.get("type") == "output_text":
                     parts.append(str(part.get("text", "")))
         return "".join(parts)
+
+    @staticmethod
+    def _extract_tool_calls(data: dict) -> list[dict]:
+        """Return ``function_call`` output items as {id, name, arguments}."""
+        calls: list[dict] = []
+        for item in data.get("output") or []:
+            if item.get("type") != "function_call":
+                continue
+            calls.append(
+                {
+                    "id": item.get("call_id") or item.get("id") or "",
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments") or "",
+                }
+            )
+        return calls
 
 
 def get_responses_client() -> ResponsesClient:

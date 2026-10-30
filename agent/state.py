@@ -17,6 +17,11 @@ class AgentState(TypedDict):
     intent: str
     retrieved_memories: list[dict]
     response: str
+    # Harness tool-calling: definitions forwarded from the client and any
+    # tool calls the model emitted for this turn (relayed back to the client).
+    tools: list[dict]
+    tool_choice: object | None
+    tool_calls: list[dict]
     # Full incoming request transcript for this turn (harness context). Kept
     # separate from `messages` so it is not re-accumulated by the checkpointer.
     prompt_messages: list[AnyMessage]

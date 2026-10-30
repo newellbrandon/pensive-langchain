@@ -71,6 +71,12 @@ while providing persistent memory for important context:
 - **Full context is honored.** Every incoming request's messages (system prompt,
   conversation history, tool results) are passed through to the model; Pensive does
   not discard anything the client sends.
+- **Tool calling works.** Tool definitions from the client are forwarded to the
+  model; tool calls the model requests are relayed back on the native channel
+  (`message.tool_calls` / `delta.tool_calls` on `/v1/chat/completions`,
+  `function_call` output items / `response.function_call_arguments.delta` on
+  `/v1/responses`), and tool results replay as `function_call_output` items — so
+  a coding harness can drive read/write/execute tools through Pensive.
 - **Persistent memory runs on top.** The four-type long-term memory pipeline
   retrieves and injects remembered context, and persists durable facts — scoped by
   `user_id` — so they carry across sessions, chats, and workflows.

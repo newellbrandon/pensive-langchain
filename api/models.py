@@ -7,14 +7,20 @@ from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: Union[str, list[Any]]
+    role: Literal["system", "user", "assistant", "tool", "developer"]
+    # content may be null on assistant tool-call turns (OpenAI convention).
+    content: Optional[Union[str, list[Any]]] = None
+    # OpenAI tool-calling fields preserved for harness integration.
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[list[dict]] = None
 
 
 class ChatCompletionRequest(BaseModel):
     model: str = "pensive"
     messages: list[ChatMessage]
     stream: bool = False
+    tools: Optional[list[dict]] = None
+    tool_choice: Optional[Any] = None
     user: Optional[Union[str, dict[str, Any]]] = None
     metadata: Optional[dict[str, Any]] = None
     # OpenWebUI session fields (forwarded on external OpenAI connections)
