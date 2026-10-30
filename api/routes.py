@@ -16,6 +16,7 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 
 from agent.graph import build_graph
@@ -40,6 +41,8 @@ app.add_middleware(
 )
 
 def _message_text(message: ChatMessage) -> str:
+    if message.content is None:
+        return ""
     if isinstance(message.content, str):
         return message.content
     if isinstance(message.content, list):
@@ -153,6 +156,8 @@ def _latest_user_query(request: ChatCompletionRequest) -> str:
 
 def _responses_input_text(item: dict) -> str:
     """Extract text from a Responses API input item."""
+    if "output" in item:
+        return _responses_input_text({"content": item.get("output")})
     content = item.get("content")
     if isinstance(content, str):
         return content
@@ -166,9 +171,30 @@ def _responses_input_text(item: dict) -> str:
         return " ".join(parts)
     return str(content or "")
 
+def _chat_tool_calls(message) -> list[dict]:
+    """Convert chat-format tool_calls to LangChain AIMessage tool_calls."""
+    converted: list[dict] = []
+    for call in message.tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") or {}
+        try:
+            args = json.loads(function.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            args = {}
+        converted.append(
+            {
+                "id": call.get("id", ""),
+                "name": function.get("name", ""),
+                "args": args if isinstance(args, dict) else {},
+            }
+        )
+    return converted
+
 def _chat_messages_to_langchain(body_messages: list) -> list[BaseMessage]:
     """Convert a Chat Completions message list into LangChain messages, preserving
-    every role/content so the full harness context reaches the model."""
+    every role/content (including tool calls and results) so the full harness
+    context reaches the model."""
     out: list[BaseMessage] = []
     for message in body_messages:
         text = _message_text(message)
@@ -176,16 +202,38 @@ def _chat_messages_to_langchain(body_messages: list) -> list[BaseMessage]:
         if role == "system":
             out.append(SystemMessage(content=text))
         elif role == "assistant":
-            out.append(AIMessage(content=text))
+            out.append(AIMessage(content=text, tool_calls=_chat_tool_calls(message)))
         elif role == "user":
             out.append(HumanMessage(content=text))
+        elif role == "tool":
+            out.append(ToolMessage(content=text, tool_call_id=message.tool_call_id or ""))
         else:
             out.append(HumanMessage(content=f"[{role}] {text}" if text else text))
     return out
 
+def _responses_function_calls(content_blocks: list) -> list[dict]:
+    """Convert Responses ``function_call`` content blocks to LangChain tool_calls."""
+    converted: list[dict] = []
+    for block in content_blocks or []:
+        if not isinstance(block, dict) or block.get("type") != "function_call":
+            continue
+        try:
+            args = json.loads(block.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            args = {}
+        converted.append(
+            {
+                "id": block.get("call_id", ""),
+                "name": block.get("name", ""),
+                "args": args if isinstance(args, dict) else {},
+            }
+        )
+    return converted
+
 def _responses_input_messages(body: dict) -> list[BaseMessage]:
     """Convert a Responses API request (instructions + input items) into
-    LangChain messages, preserving the full context."""
+    LangChain messages, preserving the full context (tool calls and
+    ``function_call_output`` results included)."""
     out: list[BaseMessage] = []
     instructions = body.get("instructions")
     if instructions:
@@ -196,6 +244,31 @@ def _responses_input_messages(body: dict) -> list[BaseMessage]:
     elif isinstance(raw, list):
         for item in raw:
             if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "function_call_output":
+                out.append(
+                    ToolMessage(
+                        content=_responses_input_text(item),
+                        tool_call_id=item.get("call_id") or "",
+                    )
+                )
+                continue
+            content_blocks = item.get("content")
+            if isinstance(content_blocks, list):
+                text = _responses_input_text(item)
+                role = item.get("role") or "user"
+                if role == "assistant":
+                    out.append(
+                        AIMessage(
+                            content=text,
+                            tool_calls=_responses_function_calls(content_blocks),
+                        )
+                    )
+                elif role == "system":
+                    out.append(SystemMessage(content=text))
+                else:
+                    out.append(HumanMessage(content=text))
                 continue
             role = item.get("role") or "user"
             text = _responses_input_text(item)
@@ -227,6 +300,7 @@ def _build_responses_response(
     model: str,
     content: str,
     decisions: list[dict] | None = None,
+    tool_calls: list[dict] | None = None,
 ) -> dict:
     """Build a non-streaming OpenAI Responses API response object.
 
@@ -234,11 +308,24 @@ def _build_responses_response(
     Current-turn workflow decisions are rendered on the native reasoning
     channel (a ``reasoning`` output item) so clients show them as a thought
     block, and mirrored in the standard ``metadata`` field for inspection.
+    Tool calls the model requested are emitted as ``function_call`` items.
     """
     decisions = decisions or []
+    tool_calls = tool_calls or []
     output: list[dict] = []
     if decisions:
         output.append(_reasoning_item(completion_id, _workflow_thought_text(decisions)))
+    for index, call in enumerate(tool_calls):
+        output.append(
+            {
+                "id": f"fc_{completion_id}_{index}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call.get("id", ""),
+                "name": call.get("name", ""),
+                "arguments": call.get("arguments", "") or "",
+            }
+        )
     output.append(
         {
             "id": f"msg_{completion_id}",
@@ -287,8 +374,11 @@ def _responses_completed(
     model: str,
     content: str,
     decisions: list[dict] | None = None,
+    tool_calls: list[dict] | None = None,
 ) -> str:
-    response = _build_responses_response(completion_id, model, content, decisions)
+    response = _build_responses_response(
+        completion_id, model, content, decisions, tool_calls
+    )
     payload = {"type": "response.completed", "response": response}
     return f"data: {json.dumps(payload)}\n\n"
 
@@ -318,6 +408,46 @@ def _responses_reasoning_done(completion_id: str, text: str) -> str:
         "content_index": 0,
         "text": text,
     }
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_function_call_item(
+    completion_id: str, index: int, call: dict, in_progress: bool = False
+) -> dict:
+    return {
+        "id": f"fc_{completion_id}_{index}",
+        "type": "function_call",
+        "status": "in_progress" if in_progress else "completed",
+        "call_id": call.get("id", ""),
+        "name": call.get("name", ""),
+        "arguments": "" if in_progress else (call.get("arguments", "") or ""),
+    }
+
+def _responses_function_call_added(completion_id: str, index: int, call: dict) -> str:
+    item = _responses_function_call_item(completion_id, index, call, in_progress=True)
+    payload = {"type": "response.output_item.added", "output_index": index, "item": item}
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_function_arguments_delta(completion_id: str, index: int, piece: str) -> str:
+    payload = {
+        "type": "response.function_call_arguments.delta",
+        "item_id": f"fc_{completion_id}_{index}",
+        "output_index": index,
+        "delta": piece,
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_function_arguments_done(completion_id: str, index: int, call: dict) -> str:
+    payload = {
+        "type": "response.function_call_arguments.done",
+        "item_id": f"fc_{completion_id}_{index}",
+        "output_index": index,
+        "arguments": call.get("arguments", "") or "",
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _responses_function_call_done(completion_id: str, index: int, call: dict) -> str:
+    item = _responses_function_call_item(completion_id, index, call)
+    payload = {"type": "response.output_item.done", "output_index": index, "item": item}
     return f"data: {json.dumps(payload)}\n\n"
 
 def _workflow_metadata(decisions: list[dict]) -> dict[str, str]:
@@ -369,7 +499,11 @@ def _final_answer(final_state: dict) -> str:
     answer = final_state.get("response") or ""
     if not answer and final_state.get("messages"):
         last = final_state["messages"][-1]
-        answer = getattr(last, "content", "") or str(last)
+        # Only a non-empty string message body counts as an answer; tool-call
+        # turns legitimately have an empty assistant message.
+        content = getattr(last, "content", None)
+        if isinstance(content, str) and content:
+            answer = content
     return str(answer)
 
 async def _stream_responses(
@@ -418,6 +552,7 @@ async def _stream_responses(
         return
 
     content = _final_answer(final_state)
+    tool_calls = final_state.get("tool_calls") or []
 
     if decisions:
         # Close the reasoning item with its complete thought text.
@@ -427,12 +562,24 @@ async def _stream_responses(
             completion_id, _reasoning_item(completion_id, thought)
         )
 
+    # Tool calls the model requested: streamed as function_call output items.
+    for index, call in enumerate(tool_calls):
+        yield _responses_function_call_added(completion_id, index, call)
+        arguments = call.get("arguments", "") or ""
+        if arguments:
+            for piece in _word_pieces(arguments):
+                yield _responses_function_arguments_delta(completion_id, index, piece)
+        else:
+            yield _responses_function_arguments_delta(completion_id, index, "")
+        yield _responses_function_arguments_done(completion_id, index, call)
+        yield _responses_function_call_done(completion_id, index, call)
+
     # Message channel: only the answer, word-by-word.
     if content:
         for piece in _word_pieces(content):
             yield _responses_delta_chunk(completion_id, piece)
 
-    yield _responses_completed(completion_id, model, content, decisions)
+    yield _responses_completed(completion_id, model, content, decisions, tool_calls)
     yield "data: [DONE]\n\n"
 
 class _RequestBodyAdapter:
@@ -494,7 +641,7 @@ def _chunk_payload(content: str, completion_id: str, model: str) -> str:
     }
     return f"data: {json.dumps(payload)}\n\n"
 
-def _final_chunk(completion_id: str, model: str) -> str:
+def _final_chunk(completion_id: str, model: str, finish_reason: str = "stop") -> str:
     payload = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -504,11 +651,48 @@ def _final_chunk(completion_id: str, model: str) -> str:
             {
                 "index": 0,
                 "delta": {},
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
     }
     return f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n"
+
+def _tool_call_decl_chunk(
+    completion_id: str, model: str, index: int, call: dict
+) -> str:
+    """First tool-call delta: declares id, type, and function name."""
+    delta = {
+        "tool_calls": [
+            {
+                "index": index,
+                "id": call.get("id", ""),
+                "type": "function",
+                "function": {"name": call.get("name", ""), "arguments": ""},
+            }
+        ]
+    }
+    payload = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+def _tool_call_arg_chunk(
+    completion_id: str, model: str, index: int, piece: str
+) -> str:
+    """Subsequent tool-call deltas: stream the JSON arguments."""
+    delta = {"tool_calls": [{"index": index, "function": {"arguments": piece}}]}
+    payload = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
 
 async def _run_graph(graph, input_state: dict, config: dict, on_decision=None):
     """Run the graph once; return (final_state, decisions, error).
@@ -581,6 +765,7 @@ async def _stream_graph(
         return
 
     answer = _final_answer(final_state)
+    tool_calls = final_state.get("tool_calls") or []
 
     if not reasoning_started:
         yield _role_chunk(completion_id, model)
@@ -596,7 +781,14 @@ async def _stream_graph(
                 yield _chunk_payload(buffer, completion_id, model)
                 buffer = ""
 
-    yield _final_chunk(completion_id, model)
+    # Tool calls requested by the model: declaration then arguments deltas.
+    for index, call in enumerate(tool_calls):
+        yield _tool_call_decl_chunk(completion_id, model, index, call)
+        arguments = call.get("arguments", "") or ""
+        for piece in (_word_pieces(arguments) if arguments else [""]):
+            yield _tool_call_arg_chunk(completion_id, model, index, piece)
+
+    yield _final_chunk(completion_id, model, "tool_calls" if tool_calls else "stop")
 
 def _build_chat_completion(
     completion_id: str,
@@ -604,16 +796,32 @@ def _build_chat_completion(
     content: str,
     decisions: list[dict],
     user_query: str,
+    tool_calls: list[dict] | None = None,
 ) -> dict:
     """Build a non-streaming Chat Completions response.
 
     The model's answer is the only ``message.content``. Workflow decisions are
     attached as ``message.reasoning_content`` (rendered as a thought block)
-    and mirrored in a top-level ``workflow`` field.
+    and mirrored in a top-level ``workflow`` field. Tool calls the model
+    requested are relayed in the assistant message with a ``tool_calls``
+    finish reason.
     """
     message: dict = {"role": "assistant", "content": content}
     if decisions:
         message["reasoning_content"] = _workflow_thought_text(decisions)
+    tool_calls = tool_calls or []
+    if tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": call.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": call.get("name", ""),
+                    "arguments": call.get("arguments", "") or "",
+                },
+            }
+            for call in tool_calls
+        ]
     payload: dict = {
         "id": completion_id,
         "object": "chat.completion",
@@ -623,7 +831,7 @@ def _build_chat_completion(
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": "stop",
+                "finish_reason": "tool_calls" if tool_calls else "stop",
             }
         ],
         "usage": {
@@ -703,6 +911,9 @@ async def chat_completions(
         "memory_query": "",
         "memory_candidates": [],
         "memory_context": [],
+        "tools": body.tools or [],
+        "tool_choice": body.tool_choice,
+        "tool_calls": [],
     }
 
     graph = app.state.graph
@@ -728,7 +939,14 @@ async def chat_completions(
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     content = _final_answer(final_state)
-    return _build_chat_completion(completion_id, model_name, content, decisions, user_query)
+    return _build_chat_completion(
+        completion_id,
+        model_name,
+        content,
+        decisions,
+        user_query,
+        tool_calls=final_state.get("tool_calls") or [],
+    )
 
 @app.post("/v1/responses")
 async def responses_completions(body: dict, http_request: Request):
@@ -768,6 +986,9 @@ async def responses_completions(body: dict, http_request: Request):
         "memory_query": "",
         "memory_candidates": [],
         "memory_context": [],
+        "tools": body.get("tools") or [],
+        "tool_choice": body.get("tool_choice"),
+        "tool_calls": [],
     }
 
     graph = app.state.graph
@@ -793,4 +1014,10 @@ async def responses_completions(body: dict, http_request: Request):
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     content = _final_answer(final_state)
-    return _build_responses_response(completion_id, model_name, content, decisions)
+    return _build_responses_response(
+        completion_id,
+        model_name,
+        content,
+        decisions,
+        tool_calls=final_state.get("tool_calls") or [],
+    )

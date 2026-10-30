@@ -1,6 +1,7 @@
 """LangGraph agent nodes with four-type long-term memory and streamed decisions."""
 from __future__ import annotations
 
+import json
 import logging
 from typing import Literal
 
@@ -86,7 +87,12 @@ async def search_long_term_memory(state: AgentState, runtime: Runtime) -> dict:
 
 
 async def generate_response(state: AgentState) -> dict:
-    """Generate an assistant response using the full incoming context + retrieved memory."""
+    """Generate an assistant response using the full incoming context + retrieved memory.
+
+    Tool definitions from the harness are forwarded to the model so it can
+    request read/write/execute operations; any tool calls it emits are relayed
+    back to the client in the response.
+    """
     query = _latest_user_message(state)
     memory_context = state.get("memory_context") or []
 
@@ -103,27 +109,60 @@ async def generate_response(state: AgentState) -> dict:
 
     client = get_responses_client()
     try:
-        content = await client.agenerate(prompt_messages)
-        reason = f"Generated answer ({len(content)} chars)."
+        result = await client.acomplete(
+            prompt_messages,
+            tools=state.get("tools") or None,
+            tool_choice=state.get("tool_choice"),
+        )
+        content = result.text
+        tool_calls = result.tool_calls
+        if tool_calls:
+            reason = f"Requested {len(tool_calls)} tool call(s)."
+        else:
+            reason = f"Generated answer ({len(content)} chars)."
     except Exception as exc:
-        logger.error("LLM generation failed: %s", type(exc).__name__)
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.error("LLM generation failed: %s", detail)
         content = (
             "Sorry, I couldn't reach the language model. "
-            f"Error: {type(exc).__name__}"
+            f"Error: {detail[:300]}"
         )
-        reason = f"Generation failed: {type(exc).__name__}"
+        tool_calls = []
+        reason = f"Generation failed: {detail[:200]}"
 
-    _emit_decision("generate_response", "respond", reason)
+    _emit_decision("generate_response", "tool_calls" if tool_calls else "respond", reason)
     decision = {
         "step": "generate_response",
-        "decision": "respond",
+        "decision": "tool_calls" if tool_calls else "respond",
         "reason": reason,
     }
+    assistant_message = AIMessage(content=content)
+    if tool_calls:
+        assistant_message = AIMessage(
+            content=content,
+            tool_calls=[
+                {
+                    "id": call.get("id", ""),
+                    "name": call.get("name", ""),
+                    "args": _parse_arguments(call.get("arguments", "")),
+                }
+                for call in tool_calls
+            ],
+        )
     return {
         "response": content,
-        "messages": [AIMessage(content=content)],
+        "tool_calls": tool_calls,
+        "messages": [assistant_message],
         "decisions": [decision],
     }
+
+
+def _parse_arguments(arguments: str) -> dict:
+    try:
+        parsed = json.loads(arguments or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        return {}
 
 
 async def save_memory(state: AgentState, runtime: Runtime) -> dict:

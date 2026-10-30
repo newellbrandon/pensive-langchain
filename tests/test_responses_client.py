@@ -4,11 +4,14 @@ covers:
 - URL normalization (LLM_URI may or may not include the /responses suffix)
 - request shape (model, instructions, input) and Authorization header
 - extraction of the final assistant answer, ignoring reasoning/"thinking" items
+- tool definition forwarding, function-call extraction, and result replay
 """
 from __future__ import annotations
 
 import asyncio
 
+import httpx
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from config import Config
@@ -166,6 +169,168 @@ class TestResponsesClient:
             )
 
         body = session.post.await_args.kwargs["json"]
-        texts = [i["content"][0]["text"] for i in body["input"]]
-        assert any("tool" in t for t in texts)
-        assert any("<file contents>" in t for t in texts)
+        # Tool results must replay as proper function_call_output items so the
+        # upstream Responses API sees the call/result pairing.
+        assert body["input"][1] == {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "<file contents>",
+        }
+
+
+def _sample_tool_call_response() -> dict:
+    return {
+        "id": "resp_1",
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "id": "fc_1",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_abc",
+                "name": "read",
+                "arguments": '{"path": "README.md"}',
+            },
+            {
+                "id": "msg_1",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": ""}],
+                "phase": "final_answer",
+            },
+        ],
+    }
+
+
+class TestResponsesClientTools:
+    def test_forwards_tools_and_tool_choice(self):
+        payload = _sample_response("ok", with_reasoning=False)
+        session, factory = _fake_http(payload)
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        with patch("httpx.AsyncClient", factory):
+            _run(
+                client.acomplete(
+                    [HumanMessage(content="read the file")], tools=tools, tool_choice="auto"
+                )
+            )
+
+        body = session.post.await_args.kwargs["json"]
+        assert body["tools"] == [
+            {
+                "type": "function",
+                "name": "read",
+                "description": "Read a file",
+                "parameters": {"type": "object"},
+            }
+        ]
+        assert body["tool_choice"] == "auto"
+
+    def test_passes_responses_format_tools_through(self):
+        payload = _sample_response("ok", with_reasoning=False)
+        session, factory = _fake_http(payload)
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+
+        tools = [{"type": "function", "name": "exec", "description": "Run a command"}]
+        with patch("httpx.AsyncClient", factory):
+            _run(client.acomplete([HumanMessage(content="run it")], tools=tools))
+
+        body = session.post.await_args.kwargs["json"]
+        assert body["tools"] == tools
+
+    def test_extracts_tool_calls_together_with_answer(self):
+        session, factory = _fake_http(_sample_tool_call_response())
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", factory):
+            result = _run(client.acomplete([HumanMessage(content="read the file")]))
+
+        assert result.text == ""
+        assert result.tool_calls == [
+            {"id": "call_abc", "name": "read", "arguments": '{"path": "README.md"}'}
+        ]
+
+    def test_error_surfaces_upstream_response_body(self):
+        resp = MagicMock()
+        resp.status_code = 400
+        resp.text = '{"error": {"message": "bad function_call"}}'
+        resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "Bad Request", request=MagicMock(), response=resp
+            )
+        )
+        resp.request = MagicMock()
+
+        session = AsyncMock()
+        session.post = AsyncMock(return_value=resp)
+
+        async def _aenter(*_args, **_kwargs):
+            return session
+
+        async def _aexit(*_args, **_kwargs):
+            return False
+
+        cm = MagicMock()
+        cm.__aenter__ = _aenter
+        cm.__aexit__ = _aexit
+        factory = MagicMock(return_value=cm)
+
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+        with patch("httpx.AsyncClient", factory):
+            with pytest.raises(httpx.HTTPStatusError) as excinfo:
+                _run(client.acomplete([HumanMessage(content="Hi")]))
+
+        assert "bad function_call" in str(excinfo.value)
+
+    def test_replays_assistant_tool_calls_and_results(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        payload = _sample_response("done", with_reasoning=False)
+        session, factory = _fake_http(payload)
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", factory):
+            _run(
+                client.acomplete(
+                    [
+                        HumanMessage(content="read README"),
+                        AIMessage(
+                            content="",
+                            tool_calls=[{"id": "call_1", "name": "read", "args": {"path": "README.md"}}],
+                        ),
+                        ToolMessage(content="line 1: # Pensive", tool_call_id="call_1"),
+                    ]
+                )
+            )
+
+        body = session.post.await_args.kwargs["json"]
+        items = body["input"]
+        # Assistant tool calls replay as top-level function_call input items
+        # (the gateway rejects function_call content blocks), followed by the
+        # function_call_output result paired by call_id.
+        assert len(items) == 3
+        assert items[0]["role"] == "user"
+        assert items[1] == {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "read",
+            "arguments": '{"path": "README.md"}',
+            "status": "completed",
+        }
+        assert items[2] == {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "line 1: # Pensive",
+        }
