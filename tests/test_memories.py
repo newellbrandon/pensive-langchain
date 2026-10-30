@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import httpx
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from memory import memories as mem
 from memory.memories import MemoryPlan
@@ -158,12 +158,44 @@ class FormatTest(unittest.TestCase):
 
 
 class PlanTest(unittest.TestCase):
-    def test_falls_back_to_raw_query_on_llm_failure(self):
+    def test_falls_back_to_no_memory_search_on_llm_failure(self):
         client = FakeClient(RuntimeError("boom"))
         plan = _run(mem.plan_memory_query(client, [HumanMessage(content="inspire me")]))
         self.assertIsInstance(plan, MemoryPlan)
-        self.assertTrue(plan.needs_memory)
+        # A failed analysis must not claim memory is needed.
+        self.assertFalse(plan.needs_memory)
         self.assertEqual(plan.query, "inspire me")
+        self.assertEqual(plan.rationale, "Intent analysis unavailable")
+
+    def test_classify_context_is_text_only_across_tool_turns(self):
+        client = FakeClient(
+            json.dumps({
+                "intent": "general",
+                "needs_memory": False,
+                "query": "",
+                "rationale": "simple",
+            })
+        )
+        transcript = [
+            HumanMessage(content="read the file"),
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_1", "name": "read", "args": {"path": "README.md"}}],
+            ),
+            ToolMessage(content="<file>", tool_call_id="call_1"),
+            HumanMessage(content="what does it say?"),
+        ]
+        plan = _run(mem.plan_memory_query(client, transcript))
+        self.assertEqual(plan.intent, "general")
+        sent = client.calls[-1]
+        # The classify context must be text-only: truncated tool turns would
+        # split function_call/function_call_output pairs and fail upstream (the
+        # gateway rejects outputs without a matching call).
+        self.assertTrue(all(not getattr(m, "tool_calls", None) for m in sent))
+        self.assertTrue(all(not isinstance(m, ToolMessage) for m in sent))
+        self.assertTrue(
+            any("what does it say?" in str(getattr(m, "content", "")) for m in sent)
+        )
 
     def test_parses_json_plan(self):
         payload = json.dumps({
