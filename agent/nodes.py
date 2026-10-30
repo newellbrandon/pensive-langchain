@@ -27,8 +27,9 @@ def _latest_user_message(state: AgentState) -> str:
 
 async def analyze_intent(state: AgentState) -> dict:
     """Decide whether long-term memory is needed and build a search query."""
+    context = state.get("prompt_messages") or state["messages"]
     client = get_responses_client()
-    plan = await memories.plan_memory_query(client, state["messages"])
+    plan = await memories.plan_memory_query(client, context)
     intent = "memory" if plan.needs_memory else "general"
     _emit_decision("classify_intent", intent, plan.rationale)
     decision = {
@@ -85,19 +86,23 @@ async def search_long_term_memory(state: AgentState, runtime: Runtime) -> dict:
 
 
 async def generate_response(state: AgentState) -> dict:
-    """Generate an assistant response using checkpoint history and retrieved memories."""
+    """Generate an assistant response using the full incoming context + retrieved memory."""
     query = _latest_user_message(state)
     memory_context = state.get("memory_context") or []
 
-    system_prompt = (
-        "You are Pensive, a helpful assistant with access to long-term memory that spans "
-        "semantic facts, past episodes, domain knowledge, and how the user likes things "
-        "done. Use remembered details to personalize your reply. Be concise. Never claim "
-        "to remember anything not in the supplied memory."
-    )
+    # Honoring the full request transcript (harness context) is what lets this
+    # act as an OpenCode coding model: the client's system prompt, tool results,
+    # and conversation history all flow to the model. Pensive adds persistent
+    # memory on top and does not override the caller's instructions.
+    transcript = state.get("prompt_messages") or state["messages"]
+    memory_block = memories.format_context(memory_context)
+    prompt_messages: list = []
+    if memory_block:
+        prompt_messages.append(SystemMessage(content=memory_block))
+    prompt_messages.extend(transcript)
+
     client = get_responses_client()
     try:
-        prompt_messages = memories.build_prompt_messages(system_prompt, [HumanMessage(content=query)], memory_context)
         content = await client.agenerate(prompt_messages)
         reason = f"Generated answer ({len(content)} chars)."
     except Exception as exc:

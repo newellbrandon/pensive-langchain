@@ -17,6 +17,9 @@ class AgentState(TypedDict):
     intent: str
     retrieved_memories: list[dict]
     response: str
+    # Full incoming request transcript for this turn (harness context). Kept
+    # separate from `messages` so it is not re-accumulated by the checkpointer.
+    prompt_messages: list[AnyMessage]
     # Four-type long-term memory (semantic/episodic/taxonomic/procedural).
     memory_needed: bool
     memory_query: str

@@ -59,14 +59,25 @@ class ResponsesClient:
             text = self._message_text(message)
             role = getattr(message, "type", "")
             if role == "system":
-                instructions.append(text)
+                if text:
+                    instructions.append(text)
             elif role in ("human", "user"):
-                input_items.append(
-                    {"role": "user", "content": [{"type": "input_text", "text": text}]}
-                )
+                if text:
+                    input_items.append(
+                        {"role": "user", "content": [{"type": "input_text", "text": text}]}
+                    )
             elif role in ("ai", "assistant"):
+                # Skip empty assistant turns (e.g. tool-call-only messages); the
+                # tool results that follow carry the observable content.
+                if text:
+                    input_items.append(
+                        {"role": "assistant", "content": [{"type": "output_text", "text": text}]}
+                    )
+            elif text:
+                # Preserve anything else (tool results, developer notes) so full
+                # request context is never dropped by the harness.
                 input_items.append(
-                    {"role": "assistant", "content": [{"type": "output_text", "text": text}]}
+                    {"role": "user", "content": [{"type": "input_text", "text": f"[{role}] {text}"}]}
                 )
 
         payload: dict = {
