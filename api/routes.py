@@ -84,13 +84,12 @@ def _resolve_user_id(
     if Config.USER_ID:
         return Config.USER_ID
 
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "user_id not found. Enable ENABLE_FORWARD_USER_INFO_HEADERS=True on OpenWebUI "
-            f"so {Config.OPENWEBUI_USER_ID_HEADER} is sent, or set USER_ID for local testing."
-        ),
-    )
+    # Fail open for generic OpenAI clients (e.g. an OpenCode coding harness) that
+    # don't send a user identity, so requests are never rejected. Memory is then
+    # scoped under this stable default user. Override with USER_ID in .env for
+    # per-deployment separation.
+    logger.warning("No user id from headers/body/Config; falling back to default user")
+    return "default"
 
 
 def _resolve_thread_id(

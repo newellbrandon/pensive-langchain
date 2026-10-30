@@ -15,8 +15,12 @@ from api.routes import (
     _assemble_content,
     _chat_messages_to_langchain,
     _responses_input_messages,
+    _resolve_user_id,
 )
 from api.models import ChatMessage
+from config import Config
+from fastapi import Request as FastAPIRequest
+from starlette.datastructures import Headers
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import json
 
@@ -96,6 +100,25 @@ class TestAssembleContent:
 
 
 class TestContextPreservation:
+    def test_fails_open_to_default_user(self, monkeypatch):
+        from api.models import ChatCompletionRequest
+        from starlette.datastructures import Headers
+
+        monkeypatch.setattr(Config, "USER_ID", "")
+        http = FastAPIRequest(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "headers": Headers({}).raw,
+                "query_string": b"",
+                "server": ("", 80),
+                "client": ("", 0),
+                "scheme": "http",
+            }
+        )
+        req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="hi")])
+        assert _resolve_user_id(req, http) == "default"
     def test_chat_messages_preserve_all_roles(self):
         msgs = [
             ChatMessage(role="system", content="You edit code."),
