@@ -103,6 +103,9 @@ async def generate_response(state: AgentState) -> dict:
     transcript = state.get("prompt_messages") or state["messages"]
     memory_block = memories.format_context(memory_context)
     prompt_messages: list = []
+    system_prompt = state.get("system_prompt") or ""
+    if system_prompt:
+        prompt_messages.append(SystemMessage(content=system_prompt))
     if memory_block:
         prompt_messages.append(SystemMessage(content=memory_block))
     prompt_messages.extend(transcript)

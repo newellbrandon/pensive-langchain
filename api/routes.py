@@ -6,11 +6,13 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -19,7 +21,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from admin.service import get_system_prompt
 from agent.graph import build_graph
+from api.admin_routes import router as admin_router
 from api.models import ChatCompletionRequest, ChatMessage, ModelObject, ModelsListResponse
 from config import Config, configure_langsmith
 from persistence.mongo import close, get_client, verify_connection
@@ -39,6 +43,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(admin_router)
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/ui")
 
 def _message_text(message: ChatMessage) -> str:
     if message.content is None:
@@ -886,6 +901,7 @@ async def chat_completions(
     user_id = _resolve_user_id(body, http_request)
     thread_id = _resolve_thread_id(body, http_request, user_id)
     session_metadata = _resolve_session_metadata(body, http_request)
+    system_prompt = get_system_prompt()
     config = {
         "configurable": {
             "thread_id": thread_id,
@@ -914,6 +930,7 @@ async def chat_completions(
         "tools": body.tools or [],
         "tool_choice": body.tool_choice,
         "tool_calls": [],
+        "system_prompt": system_prompt,
     }
 
     graph = app.state.graph
@@ -961,6 +978,7 @@ async def responses_completions(body: dict, http_request: Request):
     user_id = _resolve_user_id(adapter, http_request)
     thread_id = _resolve_thread_id(adapter, http_request, user_id)
     session_metadata = _resolve_session_metadata(adapter, http_request)
+    system_prompt = get_system_prompt()
     config = {
         "configurable": {
             "thread_id": thread_id,
@@ -989,6 +1007,7 @@ async def responses_completions(body: dict, http_request: Request):
         "tools": body.get("tools") or [],
         "tool_choice": body.get("tool_choice"),
         "tool_calls": [],
+        "system_prompt": system_prompt,
     }
 
     graph = app.state.graph

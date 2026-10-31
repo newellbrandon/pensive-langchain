@@ -84,6 +84,18 @@ class TestResponsesUrl:
         monkeypatch.setattr(Config, "LLM_URI", "https://gateway.example/v1/")
         assert Config.responses_url() == "https://gateway.example/v1/responses"
 
+    def test_maps_chat_completions_uri_to_responses(self, monkeypatch):
+        monkeypatch.setattr(
+            Config, "LLM_URI", "https://gateway.example/v1/chat/completions"
+        )
+        assert Config.responses_url() == "https://gateway.example/v1/responses"
+
+    def test_openai_base_url_strips_chat_completions(self, monkeypatch):
+        monkeypatch.setattr(
+            Config, "LLM_URI", "https://gateway.example/v1/chat/completions"
+        )
+        assert Config.openai_base_url() == "https://gateway.example/v1"
+
 
 class TestResponsesClient:
     def test_builds_request_with_bearer_auth_instructions_and_input(self):
