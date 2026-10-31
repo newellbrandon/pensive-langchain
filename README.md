@@ -93,7 +93,9 @@ canvas, mongo-green accents) and powers four workflows:
 | --- | --------------- |
 | **Memories** | Browse and curate the four long-term memory types per user — **Semantic** (user facts and preferences), **Episodic** (session events, decisions, outcomes), **Taxonomic** (domain vocabulary and reusable concepts like corporate policies), **Procedural** (reusable workflows and agent runbooks — skills). Correct a memory and it is **re-embedded automatically** (the write goes through the LangGraph store's vector index); prune to delete. |
 | **System Prompt** | View and change the assistant persona injected at the top of every main-context request. Persisted in MongoDB; leave empty to restore the built-in default. |
-| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. |
+| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. Leave the name blank to **auto-generate** one (e.g. `coral-scribe-3621`), and tools empty to enable the built-in sandboxed tools (`write_file`, `append_file`, `read_file`, `run_command`). |
+
+**Agent tool execution.** Agent tool calls are actually *executed*: file and shell tools run inside a per-agent workspace directory (`./agent-workspaces/<agent_id>/`, mounted into the container so built apps survive restarts), results are fed back to the model in a loop (up to 24 steps), and transient upstream failures or broken tool-call payloads are retried automatically. Every tool failure becomes a model-visible `[error]` result — never a crash — with actionable guidance (invalid JSON is reported with reissue instructions; large files should be built with `append_file`).
 
 Backing REST API (all under `/api/admin`): `memory-types`, `memories` (GET/PUT/DELETE),
 `system-prompt` (GET/PUT), `agents` (CRUD + `POST /agents/{id}/run`).
@@ -371,23 +373,29 @@ curl -N http://localhost:8000/v1/chat/completions \
 
 ```
 pensive/
-├── Dockerfile              # container image
-├── docker-compose.yml      # docker compose up -d --build
+├── Dockerfile              # container image (+ pytest for the agent lab)
+├── docker-compose.yml      # docker compose up -d --build (mounts agent-workspaces/)
 ├── main.py                 # uvicorn entry
 ├── config.py               # environment configuration
 ├── agent/
 │   ├── graph.py            # LangGraph workflow
 │   ├── nodes.py            # analyze_intent, search, generate, save
 │   └── state.py            # AgentState schema
+├── admin/
+│   ├── executor.py         # sandboxed agent tools (write/append/read/run_command)
+│   └── service.py          # agent registry, run loop, memory curation, system prompt
 ├── memory/
 │   └── memories.py         # four-type memory pipeline (semantic/episodic/taxonomic/procedural)
 ├── api/
 │   ├── routes.py           # OpenAI-compatible FastAPI routes
+│   ├── admin_routes.py     # /api/admin REST API (UI + agent lab)
 │   └── models.py           # request/response schemas
 ├── persistence/
 │   └── mongo.py            # MongoDBSaver + MongoDBStore
+├── static/                 # Pensive Console UI (MongoDB theme)
 ├── utils/
 │   └── llm.py              # OpenAI Responses API + Voyage embeddings clients
+├── agent-workspaces/       # per-agent sandboxes (gitignored, host-mounted)
 └── scripts/
     └── setup_memory_index.py
 ```
