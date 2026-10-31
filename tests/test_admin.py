@@ -34,14 +34,17 @@ class FakeCollection:
         self.calls.append(("find", query))
 
         def match(doc):
+            doc_value = doc.get("value")
             for field, value in query.items():
-                if field == "value.user_id" and (doc.get("value") or {}).get("user_id") != value:
+                if field == "value.user_id":
+                    if not isinstance(doc_value, dict) or doc_value.get("user_id") != value:
+                        return False
+                elif field == "value.type":
+                    if not isinstance(doc_value, dict) or doc_value.get("type") != value:
+                        return False
+                elif field == "key" and doc.get("key") != value:
                     return False
-                if field == "value.type" and (doc.get("value") or {}).get("type") != value:
-                    return False
-                if field == "key" and doc.get("key") != value:
-                    return False
-                if field == "_id" and doc.get("_id") != value:
+                elif field == "_id" and doc.get("_id") != value:
                     return False
             return True
 
@@ -150,6 +153,22 @@ class MemoryCurationTest(unittest.TestCase):
         self.assertEqual([r["content"] for r in rows], ["Brandon"])
         rows_all = admin.list_memories("u1", collection=self.coll, store=self.store)
         self.assertEqual(len(rows_all), 2)
+
+    def test_memory_counts_are_unfiltered_per_type(self):
+        counts = admin.memory_counts("u1", collection=self.coll, store=self.store)
+        self.assertEqual(counts["semantic"], 1)
+        self.assertEqual(counts["taxonomic"], 1)
+        self.assertEqual(counts["episodic"], 0)
+
+    def test_memory_counts_ignore_legacy_string_values(self):
+        legacy = {
+            "_id": "legacy",
+            "key": "k9",
+            "value": "{'content': 'old', 'user_id': 'u1', 'type': 'episodic'}",
+        }
+        self.coll.docs.append(legacy)
+        counts = admin.memory_counts("u1", collection=self.coll, store=self.store)
+        self.assertEqual(counts["episodic"], 0)
 
     def test_update_memory_reembeds_via_store_put(self):
         record = admin.update_memory(
@@ -307,11 +326,16 @@ def test_list_memories_delegates_to_service(monkeypatch):
              "content": "Brandon", "recorded_at": None, "updated_at": None}
         ],
     )
+    monkeypatch.setattr(
+        admin, "memory_counts",
+        lambda user_id: {"semantic": 1, "episodic": 0, "taxonomic": 0, "procedural": 0},
+    )
     response = _client.get("/api/admin/memories?user_id=u1&mem_type=semantic")
     assert response.status_code == 200
     body = response.json()
     assert body["user_id"] == "u1"
     assert body["memories"][0]["content"] == "Brandon"
+    assert body["counts"]["semantic"] == 1
 
 
 def test_update_memory_maps_errors(monkeypatch):

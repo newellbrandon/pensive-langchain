@@ -110,7 +110,9 @@ def list_memories(
         query["value.type"] = mem_type
     rows: list[dict] = []
     for doc in _memories_collection(collection).find(query).sort("updated_at", -1):
-        value = doc.get("value") or {}
+        value = doc.get("value")
+        if not isinstance(value, dict):
+            continue
         rows.append(
             {
                 "key": doc.get("key") or "",
@@ -122,6 +124,26 @@ def list_memories(
             }
         )
     return rows
+
+
+def memory_counts(
+    user_id: str = DEFAULT_USER_ID,
+    *,
+    collection: Collection | None = None,
+    store=None,
+) -> dict[str, int]:
+    """Per-type memory counts for a user, always computed UNFILTERED so panel
+    badges stay correct regardless of any active type filter in the UI."""
+    del store
+    counts: dict[str, int] = {mem_type: 0 for mem_type in MEMORY_TYPES}
+    for doc in _memories_collection(collection).find({"value.user_id": user_id}):
+        value = doc.get("value")
+        if not isinstance(value, dict):
+            continue  # legacy string-encoded records are not curatable
+        mem_type = value.get("type")
+        if mem_type in counts:
+            counts[mem_type] += 1
+    return counts
 
 
 def _record_from_value(key: str, value: dict) -> dict:

@@ -50,7 +50,8 @@ async def list_memories(user_id: str = "default", mem_type: Optional[str] = None
         rows = admin.list_memories(user_id, mem_type)
     except ValueError as exc:
         raise _bad_request(exc)
-    return {"user_id": user_id, "memories": rows}
+    counts = admin.memory_counts(user_id)
+    return {"user_id": user_id, "memories": rows, "counts": counts}
 
 
 @router.put("/memories/{mem_type}/{key}")
