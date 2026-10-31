@@ -68,3 +68,5 @@ logs/
 .cursor
 .continue
 .archive/
+# Agent lab sandboxes (generated content, host-mounted)
+agent-workspaces/

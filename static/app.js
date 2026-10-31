@@ -339,6 +339,7 @@ function agentCard(agent) {
         ? `<details><summary>${result.tool_calls.length} tool call(s) requested</summary>${esc(JSON.stringify(result.tool_calls, null, 2))}</details>`
         : "";
       resultBox.innerHTML = `
+        ${result.workspace ? `<p class="decisions">workspace: <code>${esc(result.workspace)}</code></p>` : ""}
         <p class="answer">${esc(result.answer || "(no answer text)")}</p>
         ${toolCalls}
         <p class="decisions">${decisionLines || "no decisions recorded"}</p>

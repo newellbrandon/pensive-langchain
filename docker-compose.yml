@@ -25,6 +25,11 @@ services:
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT}
       - API_HOST=0.0.0.0
       - API_PORT=8000
+      - PENSIVE_AGENT_WORKSPACES=/app/agent-workspaces
+    volumes:
+      # Agent lab workspaces live on the host so built apps survive container
+      # recreations (path: ${PENSIVE_AGENT_WORKSPACES:-./agent-workspaces}).
+      - ./agent-workspaces:/app/agent-workspaces
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

@@ -39,7 +39,11 @@ class ResponsesClient:
         url: str,
         api_key: str,
         model: str,
-        max_output_tokens: int = 1024,
+        # Generous budget: the gateway model spends tokens on chain-of-thought
+        # BEFORE emitting function_call items, and a truncated function_call
+        # arrives as cut-off JSON arguments. 1024 was too tight for agents
+        # that write whole files in single tool calls.
+        max_output_tokens: int = 4096,
         timeout: float = 120.0,
     ) -> None:
         self._url = url
