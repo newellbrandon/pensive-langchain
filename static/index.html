@@ -76,8 +76,8 @@
         <h2 class="card-title">Create agent</h2>
         <div class="form-grid">
           <label class="field">
-            <span>Name</span>
-            <input id="agent-name" type="text" placeholder="e.g. Release note writer" />
+            <span>Name (leave blank to auto-generate)</span>
+            <input id="agent-name" type="text" placeholder="e.g. jade-scribe-4f2a" />
           </label>
           <label class="field span-2">
             <span>System prompt</span>
@@ -85,7 +85,8 @@
           </label>
           <label class="field span-2">
             <span>Tools (JSON array of OpenAI function definitions)</span>
-            <textarea id="agent-tools" rows="4" spellcheck="false" placeholder='[{"type":"function","function":{"name":"fetch_commit_log","description":"…","parameters":{…}}}]'></textarea>
+            <textarea id="agent-tools" rows="4" spellcheck="false" placeholder='[{"type":"function","function":{"name":"write_file",…}}]'></textarea>
+            <span class="hint">Built-in tools available in the agent workspace: <code>write_file</code>, <code>append_file</code>, <code>read_file</code>, <code>run_command</code>. Leave tools empty to enable all of them.</span>
           </label>
         </div>
         <div class="card-actions">

@@ -143,6 +143,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 28px 28px 60px; }
 }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 .field.span-2 { grid-column: span 2; }
+.hint { font-size: 12px; color: var(--muted); }
 input, textarea {
   background: var(--surface-2);
   border: 1px solid var(--border-strong);

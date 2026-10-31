@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from config import Config
 from admin import service as admin
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 def _run(coro):
@@ -238,6 +240,12 @@ class AgentRegistryTest(unittest.TestCase):
         agents = admin.list_agents(collection=self.coll)
         self.assertEqual([a["name"] for a in agents], ["A", "B"])
 
+    def test_blank_name_autogenerates(self):
+        agent = admin.create_agent("  ", "p", [], collection=self.coll)
+        self.assertTrue(agent["name"].strip())
+        self.assertNotEqual(agent["name"], "  ")
+        self.assertIn("-", agent["name"])
+
 
 class _FakeGraph:
     def __init__(self, decisions=None, final_state=None):
@@ -254,18 +262,20 @@ class _FakeGraph:
 
 
 class AgentRunTest(unittest.TestCase):
-    def test_run_uses_isolated_scope_agent_prompt_and_tools(self):
-        agent = {
+    def setUp(self):
+        self.agent = {
             "id": "ag_123",
             "name": "Tester",
             "system_prompt": "You are a strict tester.",
-            "tools": [{"type": "function", "name": "run", "description": "run"}],
+            "tools": admin.DEFAULT_AGENT_TOOLS,
         }
+
+    def test_run_uses_isolated_scope_agent_prompt_and_tools(self):
         graph = _FakeGraph(
             decisions=[{"step": "classify_intent", "decision": "general", "reason": "unit"}],
             final_state={"response": "all green"},
         )
-        result = _run(admin.run_agent(agent, "Test the math module", graph))
+        result = _run(admin.run_agent(self.agent, "Test the math module", graph))
 
         self.assertEqual(result["answer"], "all green")
         self.assertEqual(result["decisions"][0]["step"], "classify_intent")
@@ -273,23 +283,203 @@ class AgentRunTest(unittest.TestCase):
         # Isolation: agent memory scope, not the main user's.
         self.assertEqual(state["user_id"], "agent:ag_123")
         self.assertEqual(state["system_prompt"], "You are a strict tester.")
-        self.assertEqual(state["tools"], agent["tools"])
+        self.assertEqual(state["tools"], self.agent["tools"])
         # Messages must be LangChain messages (the client chokes on raw strings).
         self.assertTrue(isinstance(state["messages"][0], HumanMessage))
         self.assertTrue(isinstance(state["prompt_messages"][0], HumanMessage))
         config = graph.seen["config"]
         self.assertTrue(config["configurable"]["thread_id"].startswith("agent:ag_123:"))
 
-    def test_run_reports_tool_calls(self):
-        agent = {"id": "ag_2", "name": "T", "system_prompt": "p", "tools": []}
-        graph = _FakeGraph(
-            final_state={
-                "response": "",
-                "tool_calls": [{"id": "c1", "name": "run", "arguments": "{}"}],
+
+class _ScriptedGraph:
+    """Yields scripted final states, one per invocation."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.invocations = []
+
+    async def astream(self, input_state, config=None, stream_mode=None):
+        self.invocations.append(input_state)
+        state = self.responses[min(len(self.invocations) - 1, len(self.responses) - 1)]
+        yield ("values", state)
+
+
+class AgentToolLoopTest(unittest.TestCase):
+    def test_executes_tool_calls_and_feeds_results_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = {
+                "id": "ag_loop",
+                "name": "Builder",
+                "system_prompt": "p",
+                "tools": admin.DEFAULT_AGENT_TOOLS,
             }
+            graph = _ScriptedGraph(
+                [
+                    {
+                        "response": "",
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "name": "write_file",
+                                "arguments": json.dumps({"path": "diary.txt", "content": "secret"}),
+                            }
+                        ],
+                    },
+                    {"response": "done"},
+                ]
+            )
+            result = _run(admin.run_agent(agent, "write a diary", graph, workspace_base=Path(tmp)))
+
+            self.assertEqual(result["answer"], "done")
+            # the tool call was executed inside the agent workspace
+            self.assertEqual((Path(tmp) / "ag_loop" / "diary.txt").read_text(), "secret")
+            self.assertEqual(len(graph.invocations), 2)
+            # the second invocation replays the tool result
+            second = graph.invocations[1]["prompt_messages"]
+            types = [m.__class__.__name__ for m in second]
+            self.assertIn("AIMessage", types)
+            self.assertIn("ToolMessage", types)
+            tool_result = next(m for m in second if isinstance(m, ToolMessage))
+            self.assertIn("diary.txt", tool_result.content)
+
+    def test_loop_caps_at_max_steps(self):
+        agent = {"id": "ag_cap", "name": "Loop", "system_prompt": "p", "tools": admin.DEFAULT_AGENT_TOOLS}
+        always_call = {
+            "response": "",
+            "tool_calls": [
+                {"id": "c1", "name": "read_file", "arguments": json.dumps({"path": "x.txt"})}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            graph = _ScriptedGraph([always_call])
+            result = _run(
+                admin.run_agent(agent, "loop", graph, max_steps=2, workspace_base=Path(tmp))
+            )
+            self.assertEqual(len(graph.invocations), 3)
+            self.assertIn("answer", result)
+
+    def test_unknown_tool_becomes_error_result_not_crash(self):
+        agent = {"id": "ag_unk", "name": "U", "system_prompt": "p", "tools": admin.DEFAULT_AGENT_TOOLS}
+        graph = _ScriptedGraph(
+            [
+                {
+                    "response": "",
+                    "tool_calls": [{"id": "c1", "name": "nope_tool", "arguments": "{}"}],
+                },
+                {"response": "recovered"},
+            ]
         )
-        result = _run(admin.run_agent(agent, "do it", graph))
-        self.assertEqual(result["tool_calls"], [{"id": "c1", "name": "run", "arguments": "{}"}])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run(admin.run_agent(agent, "t", graph, workspace_base=Path(tmp)))
+        self.assertEqual(result["answer"], "recovered")
+        second = graph.invocations[1]["prompt_messages"]
+        tool_result = next(m for m in second if isinstance(m, ToolMessage))
+        self.assertIn("unknown tool", tool_result.content)
+
+    def test_retries_transient_upstream_failures(self):
+        agent = {"id": "ag_retry", "name": "R", "system_prompt": "p", "tools": admin.DEFAULT_AGENT_TOOLS}
+        failure = "Sorry, I couldn't reach the language model. Error: RemoteProtocolError"
+        graph = _ScriptedGraph([{"response": failure}, {"response": failure}, {"response": "ok at last"}])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run(admin.run_agent(agent, "t", graph, workspace_base=Path(tmp)))
+        self.assertEqual(result["answer"], "ok at last")
+        self.assertEqual(len(graph.invocations), 3)
+
+    def test_retries_steps_with_unparseable_tool_arguments(self):
+        agent = {"id": "ag_args", "name": "A", "system_prompt": "p", "tools": admin.DEFAULT_AGENT_TOOLS}
+        bad_call = {
+            "response": "",
+            "tool_calls": [{"id": "c1", "name": "write_file", "arguments": '{"path": "x.py", "content": "unterminated'}],
+        }
+        graph = _ScriptedGraph([bad_call, bad_call, {"response": "built it"}])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run(admin.run_agent(agent, "t", graph, workspace_base=Path(tmp)))
+        self.assertEqual(result["answer"], "built it")
+        # both broken steps were retried with a fresh sample instead of
+        # polluting the transcript or burning executed tool calls
+        self.assertEqual(len(graph.invocations), 3)
+        self.assertEqual(result["tool_calls"], [])
+
+
+class ExecutorTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_write_and_read_roundtrip(self):
+        write = admin.execute_tool_call(
+            {"id": "c1", "name": "write_file", "arguments": json.dumps({"path": "app.py", "content": "print(1)"})},
+            self.workspace,
+        )
+        self.assertIn("[ok]", write["output"])
+        read = admin.execute_tool_call(
+            {"id": "c2", "name": "read_file", "arguments": json.dumps({"path": "app.py"})},
+            self.workspace,
+        )
+        self.assertIn("print(1)", read["output"])
+        self.assertEqual((self.workspace / "app.py").read_text(), "print(1)")
+
+    def test_write_without_path_returns_actionable_error(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "write_file", "arguments": json.dumps({"content": "x"})},
+            self.workspace,
+        )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("path is required", result["output"])
+
+    def test_append_creates_and_grows_file(self):
+        first = admin.execute_tool_call(
+            {"id": "c1", "name": "append_file", "arguments": json.dumps({"path": "diary.py", "content": "part1\n"})},
+            self.workspace,
+        )
+        self.assertIn("[ok]", first["output"])
+        second = admin.execute_tool_call(
+            {"id": "c2", "name": "append_file", "arguments": json.dumps({"path": "diary.py", "content": "part2\n"})},
+            self.workspace,
+        )
+        self.assertIn("[ok]", second["output"])
+        self.assertEqual((self.workspace / "diary.py").read_text(), "part1\npart2\n")
+
+    def test_append_without_path_returns_actionable_error(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "append_file", "arguments": json.dumps({"content": "x"})},
+            self.workspace,
+        )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("path is required", result["output"])
+
+    def test_malformed_arguments_report_json_error(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "write_file", "arguments": '{"path": "x.py", "content": "unterminated' },
+            self.workspace,
+        )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("not valid JSON", result["output"])
+        self.assertIn("reissue", result["output"].lower())
+
+    def test_path_escape_is_blocked(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "write_file", "arguments": json.dumps({"path": "../evil.txt", "content": "x"})},
+            self.workspace,
+        )
+        self.assertIn("[error]", result["output"])
+        self.assertFalse((self.workspace.parent / "evil.txt").exists())
+
+    def test_run_command_executes_in_workspace(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "run_command", "arguments": json.dumps({"command": "echo hello-from-sandbox"})},
+            self.workspace,
+        )
+        self.assertIn("hello-from-sandbox", result["output"])
+
+    def test_unknown_tool_returns_error_output(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "bogus", "arguments": "{}"}, self.workspace
+        )
+        self.assertIn("[error]", result["output"])
 
 
 # --- admin API routes (standalone app, no DB startup) ------------------------
