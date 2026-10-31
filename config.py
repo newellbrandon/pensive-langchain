@@ -50,6 +50,17 @@ class Config:
     # Optional fallback for curl/local testing when no OpenWebUI session headers are present.
     USER_ID: str = os.getenv("USER_ID", "")
 
+    # Editable assistant persona. The admin UI can override this at runtime
+    # (persisted in MongoDB); this env value is the initial default.
+    SYSTEM_PROMPT: str = os.getenv(
+        "SYSTEM_PROMPT",
+        "You are Pensive, a helpful assistant with access to long-term memory "
+        "that spans semantic facts, past episodes, domain knowledge, and how "
+        "the user likes things done. Use remembered details to personalize "
+        "your reply. Be concise. Never claim to remember anything not in the "
+        "supplied memory.",
+    )
+
     OPENWEBUI_USER_ID_HEADER: str = os.getenv(
         "OPENWEBUI_USER_ID_HEADER", "X-OpenWebUI-User-Id"
     )
@@ -96,10 +107,13 @@ class Config:
     def responses_url(cls) -> str:
         """Derive the OpenAI Responses API endpoint from LLM_URI.
 
-        Accepts either a bare base URL (``…/v1``) or one that already ends in
-        ``/responses`` and normalizes to the full endpoint path.
+        Accepts a bare base URL (``…/v1``), an explicit ``/responses``
+        endpoint, or a Chat Completions URI (``…/v1/chat/completions``) and
+        normalizes to the full responses endpoint path.
         """
         uri = cls.LLM_URI.rstrip("/")
+        if uri.endswith("/chat/completions"):
+            return f"{uri[: -len('/chat/completions')]}/responses"
         if uri.endswith("/responses"):
             return uri
         return f"{uri}/responses"

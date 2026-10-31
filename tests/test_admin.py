@@ -1,0 +1,381 @@
+"""Tests for the admin management layer: memory curation, system prompt,
+and isolated test agents."""
+from __future__ import annotations
+
+import asyncio
+import json
+import unittest
+from datetime import datetime, timezone
+
+from config import Config
+from admin import service as admin
+from langchain_core.messages import HumanMessage, SystemMessage
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class FakeCursor(list):
+    def sort(self, key=None, direction=1):
+        return self
+
+
+class FakeCollection:
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+        self.calls = []
+
+    def find(self, query):
+        self.calls.append(("find", query))
+
+        def match(doc):
+            for field, value in query.items():
+                if field == "value.user_id" and (doc.get("value") or {}).get("user_id") != value:
+                    return False
+                if field == "value.type" and (doc.get("value") or {}).get("type") != value:
+                    return False
+                if field == "key" and doc.get("key") != value:
+                    return False
+                if field == "_id" and doc.get("_id") != value:
+                    return False
+            return True
+
+        return FakeCursor([d for d in self.docs if match(d)])
+
+    def find_one(self, query):
+        rows = self.find(query)
+        return rows[0] if rows else None
+
+    def insert_one(self, doc):
+        self.calls.append(("insert_one", doc))
+        self.docs.append(doc)
+        return doc
+
+    def update_one(self, query, update, upsert=False):
+        self.calls.append(("update_one", query, update))
+        rows = self.find(query)
+        if rows:
+            doc = rows[0]
+            for field, value in update.get("$set", {}).items():
+                doc[field] = value
+            return 1
+        if upsert:
+            doc = dict(query)
+            for field, value in update.get("$set", {}).items():
+                doc[field] = value
+            self.docs.append(doc)
+        return 0
+
+    def replace_one(self, query, doc, upsert=False):
+        rows = self.find(query)
+        if rows:
+            rows[0].clear()
+            rows[0].update(doc)
+        elif upsert:
+            self.docs.append(dict(doc))
+        return rows[0] if rows else None
+
+    def delete_one(self, query):
+        rows = self.find(query)
+        if rows:
+            self.docs.remove(rows[0])
+            return 1
+        return 0
+
+
+class FakeStore:
+    def __init__(self):
+        self.calls = []
+        self.data = {}
+
+    def put(self, namespace, key, value, index=None, **kwargs):
+        self.calls.append(("put", namespace, key, value))
+        self.data[(tuple(namespace), key)] = value
+
+    def delete(self, namespace, key):
+        self.calls.append(("delete", namespace, key))
+        self.data.pop((tuple(namespace), key), None)
+
+
+def _memory_doc(key, mem_type="semantic", user_id="u1", label="name", content="Brandon"):
+    return {
+        "_id": f"{mem_type}:{key}",
+        "namespace": ["users", user_id, "memories", mem_type],
+        "key": key,
+        "value": {
+            "content": content,
+            "user_id": user_id,
+            "type": mem_type,
+            "label": label,
+            "recorded_at": "2026-10-01T00:00:00+00:00",
+            "updated_at": "2026-10-02T00:00:00+00:00",
+        },
+        "created_at": "2026-10-01T00:00:00+00:00",
+        "updated_at": "2026-10-02T00:00:00+00:00",
+    }
+
+
+class SystemPromptTest(unittest.TestCase):
+    def test_default_falls_back_to_config(self):
+        coll = FakeCollection()
+        self.assertEqual(admin.get_system_prompt(collection=coll), Config.SYSTEM_PROMPT)
+
+    def test_set_persists_and_get_returns_override(self):
+        coll = FakeCollection()
+        admin.set_system_prompt("You are a test agent.", collection=coll)
+        self.assertEqual(admin.get_system_prompt(collection=coll), "You are a test agent.")
+        self.assertTrue(any(c[0] == "update_one" for c in coll.calls))
+
+
+class MemoryCurationTest(unittest.TestCase):
+    def setUp(self):
+        self.coll = FakeCollection(
+            [
+                _memory_doc("k1"),
+                _memory_doc("k2", mem_type="taxonomic", content="MongoDB"),
+                _memory_doc("k3", user_id="other", content="someone else"),
+            ]
+        )
+        self.store = FakeStore()
+
+    def test_list_filters_by_user_and_type(self):
+        rows = admin.list_memories(
+            "u1", mem_type="semantic", collection=self.coll, store=self.store
+        )
+        self.assertEqual([r["content"] for r in rows], ["Brandon"])
+        rows_all = admin.list_memories("u1", collection=self.coll, store=self.store)
+        self.assertEqual(len(rows_all), 2)
+
+    def test_update_memory_reembeds_via_store_put(self):
+        record = admin.update_memory(
+            "u1", "semantic", "k1", "Brandon Alexander",
+            collection=self.coll, store=self.store,
+        )
+        self.assertEqual(record["content"], "Brandon Alexander")
+        put_calls = [c for c in self.store.calls if c[0] == "put"]
+        self.assertEqual(len(put_calls), 1)
+        namespace, key, value = put_calls[0][1], put_calls[0][2], put_calls[0][3]
+        # Same namespace + key so the vector record is OVERWRITTEN (re-embed).
+        self.assertEqual(namespace, ("users", "u1", "memories", "semantic"))
+        self.assertEqual(key, "k1")
+        self.assertEqual(value["content"], "Brandon Alexander")
+        self.assertEqual(value["label"], "name")
+        self.assertTrue(value["updated_at"])
+
+    def test_update_unknown_memory_raises(self):
+        with self.assertRaises(KeyError):
+            admin.update_memory(
+                "u1", "semantic", "missing", "x",
+                collection=self.coll, store=self.store,
+            )
+
+    def test_update_rejects_unknown_type(self):
+        with self.assertRaises(ValueError):
+            admin.update_memory(
+                "u1", "bogus", "k1", "x",
+                collection=self.coll, store=self.store,
+            )
+
+    def test_delete_removes_memory(self):
+        deleted = admin.delete_memory(
+            "u1", "semantic", "k1", collection=self.coll, store=self.store
+        )
+        self.assertTrue(deleted)
+        self.assertIn(("delete", ("users", "u1", "memories", "semantic"), "k1"), self.store.calls)
+        self.assertFalse(
+            admin.delete_memory("u1", "semantic", "missing", collection=self.coll, store=self.store)
+        )
+
+
+class AgentRegistryTest(unittest.TestCase):
+    def setUp(self):
+        self.coll = FakeCollection()
+        self.store = FakeStore()
+
+    def test_crud_roundtrip(self):
+        agent = admin.create_agent(
+            "Formatter", "You format code.", {"fmt": {"type": "function"}},
+            collection=self.coll,
+        )
+        self.assertTrue(agent["id"])
+        self.assertEqual(agent["name"], "Formatter")
+        fetched = admin.get_agent(agent["id"], collection=self.coll)
+        self.assertEqual(fetched["system_prompt"], "You format code.")
+        updated = admin.update_agent(
+            agent["id"], system_prompt="Format with black.", collection=self.coll
+        )
+        self.assertEqual(updated["system_prompt"], "Format with black.")
+        self.assertTrue(admin.delete_agent(agent["id"], collection=self.coll))
+        self.assertIsNone(admin.get_agent(agent["id"], collection=self.coll))
+
+    def test_list_agents(self):
+        admin.create_agent("A", "p1", [], collection=self.coll)
+        admin.create_agent("B", "p2", [], collection=self.coll)
+        agents = admin.list_agents(collection=self.coll)
+        self.assertEqual([a["name"] for a in agents], ["A", "B"])
+
+
+class _FakeGraph:
+    def __init__(self, decisions=None, final_state=None):
+        self.decisions = decisions or []
+        self.final_state = final_state or {"response": "done"}
+        self.seen = {}
+
+    async def astream(self, input_state, config=None, stream_mode=None):
+        self.seen["input_state"] = input_state
+        self.seen["config"] = config
+        for decision in self.decisions:
+            yield ("custom", {"type": "decision", **decision})
+        yield ("values", self.final_state)
+
+
+class AgentRunTest(unittest.TestCase):
+    def test_run_uses_isolated_scope_agent_prompt_and_tools(self):
+        agent = {
+            "id": "ag_123",
+            "name": "Tester",
+            "system_prompt": "You are a strict tester.",
+            "tools": [{"type": "function", "name": "run", "description": "run"}],
+        }
+        graph = _FakeGraph(
+            decisions=[{"step": "classify_intent", "decision": "general", "reason": "unit"}],
+            final_state={"response": "all green"},
+        )
+        result = _run(admin.run_agent(agent, "Test the math module", graph))
+
+        self.assertEqual(result["answer"], "all green")
+        self.assertEqual(result["decisions"][0]["step"], "classify_intent")
+        state = graph.seen["input_state"]
+        # Isolation: agent memory scope, not the main user's.
+        self.assertEqual(state["user_id"], "agent:ag_123")
+        self.assertEqual(state["system_prompt"], "You are a strict tester.")
+        self.assertEqual(state["tools"], agent["tools"])
+        # Messages must be LangChain messages (the client chokes on raw strings).
+        self.assertTrue(isinstance(state["messages"][0], HumanMessage))
+        self.assertTrue(isinstance(state["prompt_messages"][0], HumanMessage))
+        config = graph.seen["config"]
+        self.assertTrue(config["configurable"]["thread_id"].startswith("agent:ag_123:"))
+
+    def test_run_reports_tool_calls(self):
+        agent = {"id": "ag_2", "name": "T", "system_prompt": "p", "tools": []}
+        graph = _FakeGraph(
+            final_state={
+                "response": "",
+                "tool_calls": [{"id": "c1", "name": "run", "arguments": "{}"}],
+            }
+        )
+        result = _run(admin.run_agent(agent, "do it", graph))
+        self.assertEqual(result["tool_calls"], [{"id": "c1", "name": "run", "arguments": "{}"}])
+
+
+# --- admin API routes (standalone app, no DB startup) ------------------------
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from api.admin_routes import router as admin_router
+
+_api_app = FastAPI()
+_api_app.include_router(admin_router)
+_api_app.state.graph = _FakeGraph(final_state={"response": "isolated answer"})
+
+_client = TestClient(_api_app)
+
+
+def test_memory_types_describe_all_four():
+    response = _client.get("/api/admin/memory-types")
+    assert response.status_code == 200
+    types = response.json()["types"]
+    assert [t["type"] for t in types] == ["semantic", "episodic", "taxonomic", "procedural"]
+    by_type = {t["type"]: t for t in types}
+    assert "User facts and preferences" in by_type["semantic"]["description"]
+    assert "Session events" in by_type["episodic"]["description"]
+    assert "corporate policies" in by_type["taxonomic"]["description"]
+    assert "skills" in by_type["procedural"]["description"].lower()
+
+
+def test_list_memories_delegates_to_service(monkeypatch):
+    monkeypatch.setattr(
+        admin, "list_memories",
+        lambda user_id, mem_type=None: [
+            {"key": "k1", "type": "semantic", "label": "name",
+             "content": "Brandon", "recorded_at": None, "updated_at": None}
+        ],
+    )
+    response = _client.get("/api/admin/memories?user_id=u1&mem_type=semantic")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["user_id"] == "u1"
+    assert body["memories"][0]["content"] == "Brandon"
+
+
+def test_update_memory_maps_errors(monkeypatch):
+    monkeypatch.setattr(
+        admin, "update_memory",
+        lambda user_id, mem_type, key, content: {"key": key, "content": content},
+    )
+    ok = _client.put("/api/admin/memories/semantic/k1?user_id=u1", json={"content": "new"})
+    assert ok.status_code == 200
+    assert ok.json()["memory"]["content"] == "new"
+
+    monkeypatch.setattr(admin, "update_memory", lambda *a, **k: (_ for _ in ()).throw(KeyError("missing")))
+    not_found = _client.put("/api/admin/memories/semantic/k1", json={"content": "x"})
+    assert not_found.status_code == 404
+
+    monkeypatch.setattr(admin, "update_memory", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad type")))
+    bad = _client.put("/api/admin/memories/bogus/k1", json={"content": "x"})
+    assert bad.status_code == 400
+
+
+def test_delete_memory_404_when_missing(monkeypatch):
+    monkeypatch.setattr(admin, "delete_memory", lambda *a, **k: False)
+    response = _client.delete("/api/admin/memories/semantic/k1?user_id=u1")
+    assert response.status_code == 404
+    monkeypatch.setattr(admin, "delete_memory", lambda *a, **k: True)
+    assert _client.delete("/api/admin/memories/semantic/k1?user_id=u1").status_code == 200
+
+
+def test_system_prompt_roundtrip(monkeypatch):
+    monkeypatch.setattr(admin, "get_system_prompt", lambda: "Hello")
+    assert _client.get("/api/admin/system-prompt").json()["text"] == "Hello"
+    monkeypatch.setattr(admin, "set_system_prompt", lambda text: text)
+    response = _client.put("/api/admin/system-prompt", json={"text": "New persona"})
+    assert response.status_code == 200
+    assert response.json()["text"] == "New persona"
+
+
+def test_agent_crud_routes(monkeypatch):
+    created = {"id": "ag_1", "name": "N", "system_prompt": "p", "tools": [], "created_at": None, "updated_at": None}
+    monkeypatch.setattr(admin, "create_agent", lambda *a, **k: created)
+    response = _client.post("/api/admin/agents", json={"name": "N", "system_prompt": "p"})
+    assert response.status_code == 200
+    assert response.json()["agent"]["id"] == "ag_1"
+
+    monkeypatch.setattr(admin, "delete_agent", lambda agent_id: True)
+    assert _client.delete("/api/admin/agents/ag_1").status_code == 200
+    monkeypatch.setattr(admin, "delete_agent", lambda agent_id: False)
+    assert _client.delete("/api/admin/agents/ag_1").status_code == 404
+
+
+def test_agent_run_route_uses_graph_and_returns_result(monkeypatch):
+    agent = {"id": "ag_1", "name": "T", "system_prompt": "p", "tools": []}
+    monkeypatch.setattr(admin, "get_agent", lambda agent_id: agent)
+
+    async def fake_run(agent, task, graph):
+        return {"answer": "running", "decisions": [], "tool_calls": []}
+
+    monkeypatch.setattr(admin, "run_agent", fake_run)
+    response = _client.post("/api/admin/agents/ag_1/run", json={"task": "do it"})
+    assert response.status_code == 200
+    assert response.json()["answer"] == "running"
+
+
+def test_agent_run_missing_agent_404(monkeypatch):
+    monkeypatch.setattr(admin, "get_agent", lambda agent_id: None)
+    response = _client.post("/api/admin/agents/nope/run", json={"task": "x"})
+    assert response.status_code == 404

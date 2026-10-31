@@ -84,6 +84,20 @@ while providing persistent memory for important context:
   `pensive` (see [OpenWebUI Configuration](#openwebui-configuration) and the OpenCode
   provider config in the OpenCode docs).
 
+## Pensive Console (Web UI)
+
+The management UI lives at **`http://<host>:8000/ui`** (MongoDB visual theme — dark navy
+canvas, mongo-green accents) and powers four workflows:
+
+| Tab | What you can do |
+| --- | --------------- |
+| **Memories** | Browse and curate the four long-term memory types per user — **Semantic** (user facts and preferences), **Episodic** (session events, decisions, outcomes), **Taxonomic** (domain vocabulary and reusable concepts like corporate policies), **Procedural** (reusable workflows and agent runbooks — skills). Correct a memory and it is **re-embedded automatically** (the write goes through the LangGraph store's vector index); prune to delete. |
+| **System Prompt** | View and change the assistant persona injected at the top of every main-context request. Persisted in MongoDB; leave empty to restore the built-in default. |
+| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. |
+
+Backing REST API (all under `/api/admin`): `memory-types`, `memories` (GET/PUT/DELETE),
+`system-prompt` (GET/PUT), `agents` (CRUD + `POST /agents/{id}/run`).
+
 ## Long-Term Memory (Four Types)
 
 Pensive's long-term memory is organized into the same four types used by the

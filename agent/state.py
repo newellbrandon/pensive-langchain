@@ -17,6 +17,9 @@ class AgentState(TypedDict):
     intent: str
     retrieved_memories: list[dict]
     response: str
+    # Editable assistant persona (env default; admin UI override). Empty means
+    # honor the client's own instructions without adding a persona.
+    system_prompt: str
     # Harness tool-calling: definitions forwarded from the client and any
     # tool calls the model emitted for this turn (relayed back to the client).
     tools: list[dict]

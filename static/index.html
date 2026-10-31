@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pensive Console — MongoDB</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2300ED64' d='M16 2 C8 8 6 14 8 22 c3 6 8 8 8 8 s5 -2 8 -8 c2 -8 0 -14 -8 -20 z'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="leaf" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2 C8 8 6 14 8 22 c3 6 8 8 8 8 s5 -2 8 -8 c2 -8 0 -14 -8 -20 z" fill="#00ED64"/>
+        <path d="M16 30 V10" stroke="#001E2B" stroke-width="1.5" opacity="0.5"/>
+      </svg>
+      <div>
+        <div class="brand-name">Pensive</div>
+        <div class="brand-sub">Memory curation &amp; agent lab</div>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="memories">Memories</button>
+      <button class="tab" data-tab="prompt">System Prompt</button>
+      <button class="tab" data-tab="agents">Agents</button>
+    </nav>
+    <a class="mongo-link" href="https://www.mongodb.com" target="_blank" rel="noopener">mongodb.com ↗</a>
+  </header>
+
+  <main>
+    <div id="toast" class="toast" hidden></div>
+
+    <!-- ============ MEMORIES ============ -->
+    <section id="tab-memories" class="tab-panel active">
+      <div class="panel-head">
+        <h1>Long-term memory</h1>
+        <p class="sub">Curate the four memory types Pensive persists per user. Edits are saved to MongoDB and <strong>re-embedded automatically</strong>.</p>
+      </div>
+
+      <div class="type-grid" id="type-grid"></div>
+
+      <div class="toolbar">
+        <label class="field">
+          <span>User id</span>
+          <input id="user-id" type="text" value="default" spellcheck="false" />
+        </label>
+        <button id="refresh-memories" class="btn ghost">Refresh</button>
+      </div>
+
+      <div id="memory-list" class="memory-list"></div>
+    </section>
+
+    <!-- ============ SYSTEM PROMPT ============ -->
+    <section id="tab-prompt" class="tab-panel">
+      <div class="panel-head">
+        <h1>System prompt</h1>
+        <p class="sub">The persona injected at the top of every main-context request. Leaving it empty restores the built-in default.</p>
+      </div>
+      <div class="card">
+        <textarea id="system-prompt" rows="10" spellcheck="false"></textarea>
+        <div class="card-actions">
+          <button id="save-prompt" class="btn primary">Save prompt</button>
+          <span id="prompt-status" class="status"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ AGENTS ============ -->
+    <section id="tab-agents" class="tab-panel">
+      <div class="panel-head">
+        <h1>Test agents</h1>
+        <p class="sub">Deploy an isolated agent with its own system prompt and tools. Runs are scoped to <code>agent:&lt;id&gt;</code> so they never pollute the main Pensive context.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Create agent</h2>
+        <div class="form-grid">
+          <label class="field">
+            <span>Name</span>
+            <input id="agent-name" type="text" placeholder="e.g. Release note writer" />
+          </label>
+          <label class="field span-2">
+            <span>System prompt</span>
+            <textarea id="agent-prompt" rows="3" placeholder="You are a release note writer…"></textarea>
+          </label>
+          <label class="field span-2">
+            <span>Tools (JSON array of OpenAI function definitions)</span>
+            <textarea id="agent-tools" rows="4" spellcheck="false" placeholder='[{"type":"function","function":{"name":"fetch_commit_log","description":"…","parameters":{…}}}]'></textarea>
+          </label>
+        </div>
+        <div class="card-actions">
+          <button id="create-agent" class="btn primary">Create agent</button>
+        </div>
+      </div>
+
+      <div id="agent-list" class="agent-list"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Pensive · LangGraph + MongoDB</span>
+    <a href="https://www.mongodb.com" target="_blank" rel="noopener">Powered by MongoDB</a>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
