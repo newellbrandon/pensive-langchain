@@ -120,26 +120,35 @@ async function loadMemories() {
   try {
     const data = await api(`/api/admin/memories?${params}`);
     renderMemories(data.memories);
-    updateCounts(data.memories);
+    updateCounts(data.counts);
   } catch (error) {
     document.getElementById("memory-list").innerHTML =
       `<div class="empty">Could not load memories: ${esc(error.message)}</div>`;
   }
 }
 
-function updateCounts(rows) {
+function setCardCount(card, text) {
+  let el = card.querySelector(".type-count");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "type-count";
+    card.appendChild(el);
+  }
+  el.textContent = text;
+}
+
+function updateCounts(counts) {
+  // Counts come from the API computed UNFILTERED, so panel badges stay
+  // correct no matter which type filter is currently active.
+  const map = counts || {};
+  let total = 0;
+  for (const value of Object.values(map)) total += value;
+  const allCard = document.querySelector('.type-card[data-type="all"]');
+  if (allCard) setCardCount(allCard, total === 1 ? "1 memory total" : `${total} memories total`);
   for (const meta of state.types) {
-    const count = rows.filter((row) => row.type === meta.type).length;
+    const count = map[meta.type] ?? 0;
     const card = document.querySelector(`.type-card[data-type="${meta.type}"]`);
-    if (card) {
-      let el = card.querySelector(".type-count");
-      if (!el) {
-        el = document.createElement("div");
-        el.className = "type-count";
-        card.appendChild(el);
-      }
-      el.textContent = count === 1 ? "1 memory" : `${count} memories`;
-    }
+    if (card) setCardCount(card, count === 1 ? "1 memory" : `${count} memories`);
   }
 }
 
