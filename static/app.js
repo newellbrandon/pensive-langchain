@@ -138,7 +138,7 @@ function updateCounts(rows) {
         el.className = "type-count";
         card.appendChild(el);
       }
-      el.textContent = count ? `${count} memory${count === 1 ? "" : "ies".replace("ies", "y")}`.replace("1 memories", "1 memory") : "0 memories";
+      el.textContent = count === 1 ? "1 memory" : `${count} memories`;
     }
   }
 }
