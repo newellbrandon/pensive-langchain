@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -33,7 +36,7 @@ def _state(offer=True, tools=None):
         "tool_choice": None,
         "tool_calls": [],
         "system_prompt": "",
-        "offer_spawn_tool": offer,
+        "offer_server_tools": offer,
     }
 
 
@@ -80,6 +83,9 @@ class SpawnSubagentTest(unittest.TestCase):
     def setUp(self):
         self.decisions = []
         self.recorded_runs = []
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(os.environ.pop, "PENSIVE_PROJECTS_ROOT", None)
 
         def capture(step, decision, reason):
             self.decisions.append((step, decision, reason))
@@ -115,20 +121,56 @@ class SpawnSubagentTest(unittest.TestCase):
 
     def test_server_tool_offered_when_flag_on(self):
         result, client = self.run_node(_state(), [{"text": "ok"}])
-        self.assertIn("spawn_subagent", self.tool_names(client))
+        names = self.tool_names(client)
+        self.assertIn("spawn_subagent", names)
+        self.assertIn("project_list", names)
+        self.assertIn("project_read", names)
         self.assertEqual(result["response"], "ok")
         self.assertEqual(result["tool_calls"], [])
 
     def test_no_server_tool_without_flag(self):
         client_tool = {"type": "function", "function": {"name": "edit", "description": "d"}}
         result, client = self.run_node(_state(offer=False, tools=[client_tool]), [{"text": "ok"}])
-        self.assertNotIn("spawn_subagent", self.tool_names(client))
-        self.assertIn("edit", self.tool_names(client))
+        names = self.tool_names(client)
+        self.assertNotIn("spawn_subagent", names)
+        self.assertNotIn("project_list", names)
+        self.assertIn("edit", names)
 
     def test_client_tool_calls_still_relayed(self):
         call = {"id": "c1", "name": "read_file", "arguments": json.dumps({"path": "x.txt"})}
         result, _ = self.run_node(_state(tools=[]), [{"text": "", "tool_calls": [call]}])
         self.assertEqual(result["tool_calls"], [call])
+
+    def test_project_tool_executed_and_result_fed_back(self):
+        root = Path(self.tmp.name)
+        os.environ["PENSIVE_PROJECTS_ROOT"] = str(root)
+        (root / "okf").mkdir(parents=True)
+        (root / "okf" / "index.md").write_text("# Bundle index\n\nconcept docs live here")
+
+        call = {"id": "p1", "name": "project_read", "arguments": json.dumps({"path": "okf/index.md"})}
+        steps = [
+            {"text": "", "tool_calls": [call]},
+            {"text": "The bundle index says concept docs live there.", "tool_calls": []},
+        ]
+        result, client = self.run_node(_state(), steps)
+        self.assertEqual(result["response"], "The bundle index says concept docs live there.")
+        self.assertEqual(result["tool_calls"], [])
+        second = client.calls[1]["messages"]
+        tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
+        self.assertTrue(any("Bundle index" in m.content for m in tool_msgs))
+        self.assertTrue(any("concept docs live here" in m.content for m in tool_msgs))
+
+    def test_project_tool_disabled_when_root_unset_returns_error(self):
+        call = {"id": "p1", "name": "project_read", "arguments": json.dumps({"path": "okf/index.md"})}
+        steps = [
+            {"text": "", "tool_calls": [call]},
+            {"text": "not available", "tool_calls": []},
+        ]
+        result, client = self.run_node(_state(), steps)
+        self.assertEqual(result["response"], "not available")
+        second = client.calls[1]["messages"]
+        tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
+        self.assertTrue(any("not configured" in m.content for m in tool_msgs))
 
     def test_spawn_executes_isolated_subagent_and_returns_digest(self):
         graph = _FakeSubGraph({"response": "research digest: HNSW is the index", "tool_calls": [], "decisions": []})
@@ -146,7 +188,7 @@ class SpawnSubagentTest(unittest.TestCase):
         thread = graph.invocations[0]["config"]["configurable"]["thread_id"]
         self.assertTrue(thread.startswith("agent:sub-"), thread)
         # subagents never see the spawn tool (no nesting)
-        self.assertFalse(inv["offer_spawn_tool"])
+        self.assertFalse(inv["offer_server_tools"])
         self.assertEqual(inv["tools"], admin.DEFAULT_AGENT_TOOLS)
 
         # digest was fed back to the main model as a ToolMessage
@@ -176,7 +218,7 @@ class SpawnSubagentTest(unittest.TestCase):
         fourth = client.calls[3]["messages"]
         err = [m for m in fourth if isinstance(m, ToolMessage) and "budget exhausted" in m.content]
         self.assertTrue(err)
-        self.assertTrue(any(d[0] == "spawn_subagent" and d[1] == "skipped" for d in self.decisions))
+        self.assertTrue(any(d[0] == "server_tools" and d[1] == "skipped" for d in self.decisions))
 
     def test_missing_task_returns_error_result(self):
         graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})

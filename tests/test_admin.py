@@ -588,6 +588,11 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("web_search", names)
         self.assertIn("web_extract", names)
 
+    def test_default_tools_include_project_browsing(self):
+        names = [t["function"]["name"] for t in admin.DEFAULT_AGENT_TOOLS]
+        self.assertIn("project_list", names)
+        self.assertIn("project_read", names)
+
     def test_web_search_formats_results(self):
         class FakeDDGS:
             def __init__(self, timeout=None):
@@ -650,6 +655,58 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("[ok]", result["output"])
         self.assertIn("# Hello", result["output"])
         self.assertLess(len(result["output"]), 9000)
+
+    def test_project_list_and_read_within_projects_root(self):
+        root = Path(self.tmp.name) / "projects"
+        (root / "okf" / "concepts").mkdir(parents=True)
+        (root / "okf" / "concepts" / "memory.md").write_text("# Memory\n\nA durable fact.")
+        (root / "okf" / "index.md").write_text("# Bundle index")
+
+        listed = admin.execute_tool_call(
+            {"id": "c1", "name": "project_list", "arguments": json.dumps({"path": "okf"})},
+            self.workspace,
+            projects_root=root,
+        )
+        self.assertIn("[ok]", listed["output"])
+        self.assertIn("index.md", listed["output"])
+        self.assertIn("concepts/memory.md", listed["output"])
+
+        read = admin.execute_tool_call(
+            {"id": "c2", "name": "project_read", "arguments": json.dumps({"path": "okf/concepts/memory.md"})},
+            self.workspace,
+            projects_root=root,
+        )
+        self.assertIn("A durable fact.", read["output"])
+        self.assertIn("[ok]", read["output"])
+
+    def test_project_tools_block_escape_and_require_path(self):
+        root = Path(self.tmp.name) / "projects"
+        (root / "okf").mkdir(parents=True)
+        (root / "okf" / "index.md").write_text("x")
+
+        escaped = admin.execute_tool_call(
+            {"id": "c1", "name": "project_read", "arguments": json.dumps({"path": "../secret.txt"})},
+            self.workspace,
+            projects_root=root,
+        )
+        self.assertIn("[error]", escaped["output"])
+        self.assertNotIn("Traceback", escaped["output"])
+
+        no_path = admin.execute_tool_call(
+            {"id": "c2", "name": "project_read", "arguments": "{}"},
+            self.workspace,
+            projects_root=root,
+        )
+        self.assertIn("[error]", no_path["output"])
+
+    def test_project_tools_disabled_without_root(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "project_list", "arguments": "{}"},
+            self.workspace,
+            projects_root=None,
+        )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("not configured", result["output"].lower())
 
 
 # --- admin API routes (standalone app, no DB startup) ------------------------

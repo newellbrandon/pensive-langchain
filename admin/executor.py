@@ -146,6 +146,123 @@ def _handle_web_extract(args: dict, workspace: Path) -> str:
     return f"[ok] extracted {url}:\n{content}"
 
 
+# --- project browsing (host projects dir, read-only) ---------------------------
+
+PROJECT_TOOL_NAMES = frozenset({"project_list", "project_read"})
+_PROJECT_READ_LIMIT = 40000
+_PROJECT_FILE_LIMIT = 200
+_SKIP_PROJECT_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"}
+
+
+def _resolve_projects_root(projects_root: Path | None) -> Path | None:
+    """Projects base directory: explicit arg, else PENSIVE_PROJECTS_ROOT env."""
+    if projects_root is not None:
+        return Path(projects_root).resolve()
+    raw = os.getenv("PENSIVE_PROJECTS_ROOT", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def _walk_project_tree(base: Path, root: Path, limit: int) -> list[dict]:
+    """Sorted {'path','size','is_dir'} entries under base, relative to root."""
+    entries: list[dict] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_PROJECT_DIRS)
+        rel_dir = Path(dirpath).relative_to(root)
+        for name in sorted(dirnames):
+            rel = (name if str(rel_dir) == "." else (rel_dir / name).as_posix()) + "/"
+            entries.append({"path": rel, "size": 0, "is_dir": True})
+            if len(entries) >= limit:
+                return entries
+        for name in sorted(filenames):
+            if name.endswith(".pyc"):
+                continue
+            full = Path(dirpath) / name
+            try:
+                size = full.stat().st_size
+            except OSError:
+                size = 0
+            rel = name if str(rel_dir) == "." else (rel_dir / name).as_posix()
+            entries.append({"path": rel, "size": size, "is_dir": False})
+            if len(entries) >= limit:
+                return entries
+    return entries
+
+
+def _handle_project_list(args: dict, root: Path) -> str:
+    rel = str(args.get("path") or "").strip()
+    base = _safe_path(root, rel)
+    if not base.is_dir():
+        return f"[error] not a directory under projects: {rel or '.'}"
+    entries = _walk_project_tree(base, root, _PROJECT_FILE_LIMIT)
+    label = rel or "."
+    if not entries:
+        return f"[ok] no files under projects/{label}"
+    lines = [f"[ok] {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} under projects/{label}:"]
+    for entry in entries:
+        suffix = "/" if entry["is_dir"] else f" ({entry['size']} B)"
+        lines.append(f"  {entry['path']}{suffix}")
+    return "\n".join(lines)
+
+
+def _handle_project_read(args: dict, root: Path) -> str:
+    rel = str(args.get("path") or "").strip()
+    if not rel:
+        raise ValueError("path is required (relative to the projects root), e.g. okf/index.md")
+    path = _safe_path(root, rel)
+    if not path.is_file():
+        return f"[error] no such project file: {rel}"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"[error] {type(exc).__name__}: {exc}"
+    if len(text) > _PROJECT_READ_LIMIT:
+        text = text[:_PROJECT_READ_LIMIT] + "\n…[truncated at 40000 chars]"
+    return f"[ok] {rel} ({len(text)} chars):\n{text}"
+
+
+_PROJECT_HANDLERS: dict[str, Callable[[dict, Path], str]] = {
+    "project_list": _handle_project_list,
+    "project_read": _handle_project_read,
+}
+
+
+def execute_project_tool_call(
+    tool_call: dict,
+    projects_root: Path | None = None,
+) -> dict:
+    """Execute a project-browsing tool call. Never raises; {'name', 'output'}."""
+    name = tool_call.get("name") or ""
+    if name not in PROJECT_TOOL_NAMES:
+        return {"name": name, "output": f"[error] unknown project tool: {name}"}
+    root = _resolve_projects_root(projects_root)
+    if root is None:
+        return {
+            "name": name,
+            "output": (
+                "[error] project access is not configured on this deployment "
+                "(PENSIVE_PROJECTS_ROOT is unset)"
+            ),
+        }
+    try:
+        args = json.loads(str(tool_call.get("arguments") or "{}"))
+        if not isinstance(args, dict):
+            args = {}
+    except (ValueError, TypeError) as exc:
+        return {
+            "name": name,
+            "output": (
+                f"[error] tool arguments are not valid JSON ({exc}); reissue "
+                "the call with valid JSON"
+            ),
+        }
+    try:
+        return {"name": name, "output": _PROJECT_HANDLERS[name](args, root)}
+    except Exception as exc:  # noqa: BLE001
+        return {"name": name, "output": f"[error] {type(exc).__name__}: {exc}"}
+
+
 _HANDLERS: dict[str, Callable[[dict, Path], str]] = {
     "write_file": _handle_write_file,
     "append_file": _handle_append_file,
@@ -219,11 +336,29 @@ DEFAULT_AGENT_TOOLS: list[dict] = [
         {"url": {"type": "string", "description": "http(s) URL to fetch"}},
         ["url"],
     ),
+    _function(
+        "project_list",
+        "List files and directories inside the host projects directory "
+        "(~/projects, read-only; the OKF knowledge bundle lives under okf/). "
+        "Relative paths are from the projects root.",
+        {"path": {"type": "string", "description": "Relative directory inside projects (omit for the root listing)"}},
+        [],
+    ),
+    _function(
+        "project_read",
+        "Read a file from the host projects directory (~/projects, read-only, "
+        "truncated to ~40000 characters). Use project_list to discover paths.",
+        {"path": {"type": "string", "description": "Relative file path inside projects, e.g. okf/index.md"}},
+        ["path"],
+    ),
 ]
 
 
-def execute_tool_call(tool_call: dict, workspace: Path) -> dict:
+def execute_tool_call(tool_call: dict, workspace: Path, projects_root: Path | None = None) -> dict:
     """Execute one tool call. Never raises; returns {'name', 'output'}."""
+    name = tool_call.get("name") or ""
+    if name in PROJECT_TOOL_NAMES:
+        return execute_project_tool_call(tool_call, projects_root=projects_root)
     # Resolve once so handlers compare like-for-like paths (macOS /var → /private/var).
     workspace = workspace.resolve()
     name = tool_call.get("name") or ""
