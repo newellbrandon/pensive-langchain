@@ -87,6 +87,12 @@ while providing persistent memory for important context:
   a short digest of the subagent's final answer returns to the conversation (at
   most 2 spawns per turn, no nesting — subagents never see the spawn tool).
   Full artifacts land in the subagent's workspace and run history.
+- **Read access to your projects (incl. the OKF bundle).** The host's
+  `~/projects` directory (or `PROJECTS_HOST_DIR`) is mounted read-only into the
+  container at `/projects`, and main-context chats plus all agents get
+  `project_list` / `project_read` tools (path-escape-safe, capped at 40k chars
+  per read, disabled when `PENSIVE_PROJECTS_ROOT` is unset). The OKF knowledge
+  bundle lives under `okf/`.
 - Connect any OpenAI chat/responses client to `http://<host>:8000/v1` with model
   `pensive` (see [OpenWebUI Configuration](#openwebui-configuration) and the OpenCode
   provider config in the OpenCode docs).

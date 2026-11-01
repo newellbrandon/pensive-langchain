@@ -957,7 +957,7 @@ async def chat_completions(
         "tool_choice": body.tool_choice,
         "tool_calls": [],
         "system_prompt": system_prompt,
-        "offer_spawn_tool": True,
+        "offer_server_tools": True,
     }
 
     graph = app.state.graph
@@ -1035,7 +1035,7 @@ async def responses_completions(body: dict, http_request: Request):
         "tool_choice": body.get("tool_choice"),
         "tool_calls": [],
         "system_prompt": system_prompt,
-        "offer_spawn_tool": True,
+        "offer_server_tools": True,
     }
 
     graph = app.state.graph

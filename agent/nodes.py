@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 
 from admin import service as admin
+from admin.executor import PROJECT_TOOL_NAMES, execute_project_tool_call
 from agent.state import AgentState
 from memory import memories
 from utils.llm import get_responses_client
@@ -95,12 +96,13 @@ async def generate_response(state: AgentState) -> dict:
     request read/write/execute operations; any tool calls it emits are relayed
     back to the client in the response.
 
-    When ``offer_spawn_tool`` is set (main-context chats only), the model is
-    also offered ``spawn_subagent``: a server-side tool that delegates a task
-    to an isolated subagent (own memory scope, workspace, and tools). The
-    subagent runs through this same graph with the spawn tool removed, so
-    nesting is impossible; only a short digest of its answer returns to the
-    primary context, keeping the conversation window clean.
+    When ``offer_server_tools`` is set (main-context chats only), the model is
+    also offered ``spawn_subagent`` (delegate to an isolated subagent with its
+    own memory scope, workspace, and tools) and the read-only project tools
+    (``project_list`` / ``project_read`` over the host projects directory,
+    including the OKF bundle). server-executed results are fed back to the
+    model; only non-server tool calls are relayed to the client. Subagent runs
+    have the flag off, so nesting is impossible.
     """
     query = _latest_user_message(state)
     memory_context = state.get("memory_context") or []
@@ -120,13 +122,15 @@ async def generate_response(state: AgentState) -> dict:
     prompt_messages.extend(transcript)
 
     client = get_responses_client()
-    tools = _server_tools(state.get("tools") or None, bool(state.get("offer_spawn_tool")))
+    tools = _server_tools(state.get("tools") or None, bool(state.get("offer_server_tools")))
     tool_choice = state.get("tool_choice")
     spawn_budget = _SPAWN_BUDGET
+    server_budget = _SERVER_TOOL_BUDGET
+    spawn_used = 0
 
     content = ""
     tool_calls: list[dict] = []
-    for _ in range(_SPAWN_ITERATION_LIMIT):
+    for _ in range(_SERVER_ITERATION_LIMIT):
         try:
             result = await client.acomplete(
                 prompt_messages,
@@ -150,15 +154,24 @@ async def generate_response(state: AgentState) -> dict:
 
         content = result.text
         tool_calls = result.tool_calls or []
-        spawn_calls = [c for c in tool_calls if _call_name(c) == SPAWN_SUBAGENT_NAME]
-        relay_calls = [c for c in tool_calls if _call_name(c) != SPAWN_SUBAGENT_NAME]
-        if not spawn_calls:
+        server_calls = [c for c in tool_calls if _call_name(c) in SERVER_TOOL_NAMES]
+        relay_calls = [c for c in tool_calls if _call_name(c) not in SERVER_TOOL_NAMES]
+        if not server_calls:
             break
 
-        # Execute spawns server-side and feed the digests back to the model.
-        handled, exhausted = spawn_calls[:spawn_budget], spawn_calls[spawn_budget:]
+        # Execute server tools (spawns + project browsing) and feed results back.
+        handled: list[dict] = []
+        exhausted: list[dict] = []
+        for call in server_calls:
+            is_spawn = _call_name(call) == SPAWN_SUBAGENT_NAME
+            if server_budget > 0 and (not is_spawn or spawn_used < spawn_budget):
+                handled.append(call)
+                server_budget -= 1
+                spawn_used += int(is_spawn)
+            else:
+                exhausted.append(call)
         for call in handled:
-            digest = await _execute_spawn(call, state)
+            digest = await _execute_server_call(call, state)
             prompt_messages.append(
                 AIMessage(content="", tool_calls=[_to_langchain_tool_call(call)])
             )
@@ -172,18 +185,18 @@ async def generate_response(state: AgentState) -> dict:
             prompt_messages.append(
                 ToolMessage(
                     content=(
-                        "[error] subagent budget exhausted: at most 2 spawn_subagent "
-                        "calls per turn; combine tasks or finish with what you have."
+                        "[error] server tool budget exhausted: at most 2 "
+                        "spawn_subagent and 8 server tool calls per turn; "
+                        "combine tasks or finish with what you have."
                     ),
                     tool_call_id=call.get("id") or "",
                 )
             )
             _emit_decision(
-                "spawn_subagent",
+                "server_tools",
                 "skipped",
-                "budget exhausted: at most 2 spawn_subagent calls per turn",
+                "budget exhausted: at most 2 spawns and 8 server tool calls per turn",
             )
-        spawn_budget = max(0, spawn_budget - len(handled))
 
     if tool_calls:
         reason = f"Requested {len(tool_calls)} tool call(s)."
@@ -203,10 +216,13 @@ def _call_name(call: dict) -> str:
 
 
 SPAWN_SUBAGENT_NAME = "spawn_subagent"
-_SPAWN_ITERATION_LIMIT = 4
+_SERVER_ITERATION_LIMIT = 4
 _SPAWN_BUDGET = 2
+_SERVER_TOOL_BUDGET = 8
 _SPAWN_DIGEST_ANSWER_LIMIT = 4000
 _SPAWN_DIGEST_OUTPUT_LIMIT = 200
+
+SERVER_TOOL_NAMES = frozenset({SPAWN_SUBAGENT_NAME, *PROJECT_TOOL_NAMES})
 
 SPAWN_SUBAGENT_TOOL: dict = {
     "type": "function",
@@ -236,19 +252,40 @@ SPAWN_SUBAGENT_TOOL: dict = {
 }
 
 
-def _server_tools(client_tools: list[dict] | None, offer_spawn: bool) -> list[dict]:
-    """Client tool defs plus the spawn tool (unless the client defines its own)."""
+def _named_tool(name: str) -> dict:
+    for tool in admin.DEFAULT_AGENT_TOOLS:
+        if (tool.get("function") or {}).get("name") == name:
+            return tool
+    raise KeyError(f"missing built-in tool: {name}")
+
+
+PROJECT_LIST_TOOL = _named_tool("project_list")
+PROJECT_READ_TOOL = _named_tool("project_read")
+
+
+def _server_tools(client_tools: list[dict] | None, offer_server: bool) -> list[dict]:
+    """Client tool defs plus the server tools (unless the client defines its own)."""
     tools = [t for t in (client_tools or []) if isinstance(t, dict)]
-    if not offer_spawn:
+    if not offer_server:
         return tools
-    has_spawn = any(
-        (t.get("function") or {}).get("name") == SPAWN_SUBAGENT_NAME
-        or t.get("name") == SPAWN_SUBAGENT_NAME
+    defined = {
+        (t.get("function") or {}).get("name") or t.get("name")
         for t in tools
-    )
-    if not has_spawn:
-        tools.append(SPAWN_SUBAGENT_TOOL)
+    }
+    for tool in (SPAWN_SUBAGENT_TOOL, PROJECT_LIST_TOOL, PROJECT_READ_TOOL):
+        name = (tool.get("function") or {}).get("name")
+        if name not in defined:
+            tools.append(tool)
     return tools
+
+
+async def _execute_server_call(call: dict, state: AgentState) -> str:
+    """Execute one server tool call and return the result fed back to the model."""
+    name = _call_name(call)
+    if name == SPAWN_SUBAGENT_NAME:
+        return await _execute_spawn(call, state)
+    executed = execute_project_tool_call(call)
+    return executed["output"]
 
 
 async def _execute_spawn(call: dict, state: AgentState) -> str:
