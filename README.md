@@ -80,6 +80,13 @@ while providing persistent memory for important context:
 - **Persistent memory runs on top.** The four-type long-term memory pipeline
   retrieves and injects remembered context, and persists durable facts — scoped by
   `user_id` — so they carry across sessions, chats, and workflows.
+- **Subagent delegation keeps the primary context clean.** Main-context chats are
+  offered a server-side `spawn_subagent` tool: the model can delegate a
+  self-contained task (research, builds, long tool chains) to an isolated
+  subagent with its own memory scope (`agent:sub-…`), workspace, and tools. Only
+  a short digest of the subagent's final answer returns to the conversation (at
+  most 2 spawns per turn, no nesting — subagents never see the spawn tool).
+  Full artifacts land in the subagent's workspace and run history.
 - Connect any OpenAI chat/responses client to `http://<host>:8000/v1` with model
   `pensive` (see [OpenWebUI Configuration](#openwebui-configuration) and the OpenCode
   provider config in the OpenCode docs).

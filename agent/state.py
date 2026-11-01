@@ -25,6 +25,9 @@ class AgentState(TypedDict):
     tools: list[dict]
     tool_choice: object | None
     tool_calls: list[dict]
+    # Server-side capabilities: when true, the model may call spawn_subagent
+    # to delegate work to an isolated subagent (never offered to subagents).
+    offer_spawn_tool: bool
     # Full incoming request transcript for this turn (harness context). Kept
     # separate from `messages` so it is not re-accumulated by the checkpointer.
     prompt_messages: list[AnyMessage]

@@ -889,6 +889,9 @@ async def startup_event() -> None:
     configure_langsmith()
     verify_connection()
     app.state.graph = build_graph()
+    from agent.graph import set_active_graph
+
+    set_active_graph(app.state.graph)
     logger.info("Pensive API started (db=%s)", Config.MONGODB_DB)
 
 @app.on_event("shutdown")
@@ -954,6 +957,7 @@ async def chat_completions(
         "tool_choice": body.tool_choice,
         "tool_calls": [],
         "system_prompt": system_prompt,
+        "offer_spawn_tool": True,
     }
 
     graph = app.state.graph
@@ -1031,6 +1035,7 @@ async def responses_completions(body: dict, http_request: Request):
         "tool_choice": body.get("tool_choice"),
         "tool_calls": [],
         "system_prompt": system_prompt,
+        "offer_spawn_tool": True,
     }
 
     graph = app.state.graph
