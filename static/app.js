@@ -330,9 +330,10 @@ function agentCard(agent) {
   const runsDetails = div.querySelector(".agent-runs");
   const runsBox = div.querySelector(".runs-list");
 
-  // History loads lazily the first time the section is opened.
+  // History re-fetches every time the section is opened, so runs made while
+  // it was closed are never hidden behind a stale one-time load.
   runsDetails.addEventListener("toggle", () => {
-    if (runsDetails.open && !runsBox.dataset.loaded) renderAgentRuns(agent, runsBox);
+    if (runsDetails.open) renderAgentRuns(agent, runsBox);
   });
 
   runButton.addEventListener("click", async () => {
@@ -387,7 +388,6 @@ function agentCard(agent) {
 }
 
 async function renderAgentRuns(agent, container) {
-  container.dataset.loaded = "1";
   container.innerHTML = `<p class="decisions">Loading runs…</p>`;
   try {
     const data = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/runs`);
