@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from config import Config
 from admin import service as admin
@@ -545,6 +546,74 @@ class ExecutorTest(unittest.TestCase):
             {"id": "c1", "name": "bogus", "arguments": "{}"}, self.workspace
         )
         self.assertIn("[error]", result["output"])
+
+    def test_default_tools_include_web_search_and_extract(self):
+        names = [t["function"]["name"] for t in admin.DEFAULT_AGENT_TOOLS]
+        self.assertIn("web_search", names)
+        self.assertIn("web_extract", names)
+
+    def test_web_search_formats_results(self):
+        class FakeDDGS:
+            def __init__(self, timeout=None):
+                self.timeout = timeout
+
+            def text(self, query, max_results=5):
+                self.seen = (query, max_results)
+                return [
+                    {"title": "MongoDB Atlas", "href": "https://www.mongodb.com/atlas", "body": "The easiest way to run MongoDB."},
+                    {"title": "Second", "href": "https://example.com/2", "body": "Another result body."},
+                ]
+
+        with mock.patch("admin.executor.DDGS", FakeDDGS):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_search", "arguments": json.dumps({"query": "mongodb atlas"})},
+                self.workspace,
+            )
+        self.assertIn("[ok]", result["output"])
+        self.assertIn("2 web result(s)", result["output"])
+        self.assertIn("MongoDB Atlas", result["output"])
+        self.assertIn("https://www.mongodb.com/atlas", result["output"])
+
+    def test_web_search_requires_query(self):
+        result = admin.execute_tool_call(
+            {"id": "c1", "name": "web_search", "arguments": "{}"}, self.workspace
+        )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("query is required", result["output"])
+
+    def test_web_search_failure_is_actionable_error(self):
+        class BoomDDGS:
+            def __init__(self, timeout=None):
+                pass
+
+            def text(self, query, max_results=5):
+                raise RuntimeError("rate limited")
+
+        with mock.patch("admin.executor.DDGS", BoomDDGS):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_search", "arguments": json.dumps({"query": "x"})},
+                self.workspace,
+            )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("retry", result["output"].lower())
+        self.assertNotIn("Traceback", result["output"])
+
+    def test_web_extract_returns_truncated_content(self):
+        class FakeDDGS:
+            def __init__(self, timeout=None):
+                pass
+
+            def extract(self, url, fmt="text_markdown"):
+                return {"url": url, "content": "# Hello\n" + "x" * 10000}
+
+        with mock.patch("admin.executor.DDGS", FakeDDGS):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_extract", "arguments": json.dumps({"url": "https://example.com"})},
+                self.workspace,
+            )
+        self.assertIn("[ok]", result["output"])
+        self.assertIn("# Hello", result["output"])
+        self.assertLess(len(result["output"]), 9000)
 
 
 # --- admin API routes (standalone app, no DB startup) ------------------------

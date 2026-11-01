@@ -93,7 +93,7 @@ canvas, mongo-green accents) and powers four workflows:
 | --- | --------------- |
 | **Memories** | Browse and curate the four long-term memory types per user — **Semantic** (user facts and preferences), **Episodic** (session events, decisions, outcomes), **Taxonomic** (domain vocabulary and reusable concepts like corporate policies), **Procedural** (reusable workflows and agent runbooks — skills). Correct a memory and it is **re-embedded automatically** (the write goes through the LangGraph store's vector index); prune to delete. |
 | **System Prompt** | View and change the assistant persona injected at the top of every main-context request. Persisted in MongoDB; leave empty to restore the built-in default. |
-| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. Leave the name blank to **auto-generate** one (e.g. `coral-scribe-3621`), and tools empty to enable the built-in sandboxed tools (`write_file`, `append_file`, `read_file`, `run_command`). **Edit any agent** (Edit button loads its name/prompt/tools back into the form), and open **Runs & artifacts** on a card to review past runs — answer, decisions, executed tool calls — and **browse the agent's workspace files** (list + content preview via `GET /agents/{id}/workspace`). |
+| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. Leave the name blank to **auto-generate** one (e.g. `coral-scribe-3621`), and tools empty to enable the built-in sandboxed tools (`write_file`, `append_file`, `read_file`, `run_command`, `web_search`, `web_extract`). **Edit any agent** (Edit button loads its name/prompt/tools back into the form), and open **Runs & artifacts** on a card to review past runs — answer, decisions, executed tool calls — and **browse the agent's workspace files** (list + content preview via `GET /agents/{id}/workspace`). |
 
 **Agent tool execution.** Agent tool calls are actually *executed*: file and shell tools run inside a per-agent workspace directory (`./agent-workspaces/<agent_id>/`, mounted into the container so built apps survive restarts), results are fed back to the model in a loop (up to 24 steps), and transient upstream failures or broken tool-call payloads are retried automatically. Every tool failure becomes a model-visible `[error]` result — never a crash — with actionable guidance (invalid JSON is reported with reissue instructions; large files should be built with `append_file`). Completed runs are persisted (`pensive_agent_runs`) with their answer, decisions, and executed tool calls so past agents can be reviewed and re-run.
 
@@ -383,7 +383,7 @@ pensive/
 │   ├── nodes.py            # analyze_intent, search, generate, save
 │   └── state.py            # AgentState schema
 ├── admin/
-│   ├── executor.py         # sandboxed agent tools (write/append/read/run_command)
+│   ├── executor.py         # sandboxed agent tools (files, shell, web search)
 │   └── service.py          # agent registry, run loop, memory curation, system prompt
 ├── memory/
 │   └── memories.py         # four-type memory pipeline (semantic/episodic/taxonomic/procedural)
