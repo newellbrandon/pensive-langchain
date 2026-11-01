@@ -278,6 +278,19 @@ class AgentHistoryTest(unittest.TestCase):
         self.assertEqual(runs[0]["answer"], "v2")
         self.assertEqual(runs[0]["tool_calls"], [])
 
+    def test_record_run_keeps_step_history(self):
+        steps = [
+            {
+                "response": "writing now",
+                "decisions": [{"step": "generate_response", "decision": "tool_calls"}],
+                "tool_calls": [{"name": "write_file", "arguments": '{"path": "a.txt"}', "output": "[ok] wrote a.txt"}],
+            }
+        ]
+        admin.record_run("ag_1", "t", {"answer": "done", "steps": steps}, collection=self.coll)
+        runs = admin.list_runs("ag_1", collection=self.coll)
+        self.assertEqual(runs[0]["steps"], steps)
+        self.assertEqual(runs[0]["steps"][0]["tool_calls"][0]["name"], "write_file")
+
     def test_list_runs_scoped_to_agent(self):
         admin.record_run("ag_1", "t1", {"answer": "a"}, collection=self.coll)
         admin.record_run("ag_2", "t2", {"answer": "b"}, collection=self.coll)
@@ -465,6 +478,29 @@ class AgentToolLoopTest(unittest.TestCase):
         # polluting the transcript or burning executed tool calls
         self.assertEqual(len(graph.invocations), 3)
         self.assertEqual(result["tool_calls"], [])
+
+    def test_run_records_step_by_step_history(self):
+        agent = {"id": "ag_steps", "name": "S", "system_prompt": "p", "tools": admin.DEFAULT_AGENT_TOOLS}
+        graph = _ScriptedGraph(
+            [
+                {
+                    "response": "writing now",
+                    "tool_calls": [{"id": "c1", "name": "write_file", "arguments": json.dumps({"path": "a.txt", "content": "x"})}],
+                },
+                {"response": "done"},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run(admin.run_agent(agent, "t", graph, workspace_base=Path(tmp)))
+        self.assertEqual(result["answer"], "done")
+        # one step per executed tool iteration, with FULL arguments/outputs
+        self.assertEqual(len(result["steps"]), 1)
+        step = result["steps"][0]
+        self.assertEqual(step["response"], "writing now")
+        self.assertEqual(step["tool_calls"][0]["name"], "write_file")
+        self.assertIn("a.txt", step["tool_calls"][0]["output"])
+        parsed_args = json.loads(step["tool_calls"][0]["arguments"])
+        self.assertEqual(parsed_args, {"path": "a.txt", "content": "x"})
 
 
 class ExecutorTest(unittest.TestCase):

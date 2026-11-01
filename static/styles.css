@@ -259,9 +259,16 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 .run-item > summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
 .run-item .run-task { font-weight: 500; flex: 1; }
 .run-item .run-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.run-item .run-again { flex-shrink: 0; }
 .run-detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .run-detail .answer { white-space: pre-wrap; font-size: 13px; margin: 0 0 8px; }
 .run-tools summary { cursor: pointer; color: var(--green-2); font-size: 12.5px; }
+.run-step { margin-top: 6px; background: var(--canvas); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+.run-step > summary { cursor: pointer; color: var(--green-2); font-size: 12.5px; font-weight: 600; }
+.step-call { margin-top: 8px; }
+.step-call-name { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; font-weight: 700; }
+.step-call-label { color: var(--muted); font-size: 11px; display: inline-block; margin-top: 6px; }
+.step-call .tool-log { margin: 3px 0 0; }
 .tool-log {
   background: var(--canvas);
   border: 1px solid var(--border);
