@@ -727,3 +727,15 @@ def test_workspace_routes_list_files_and_read_content(monkeypatch):
         lambda agent_id, path, base=None: (_ for _ in ()).throw(ValueError("escapes")),
     )
     assert _client.get("/api/admin/agents/ag_1/workspace/file?path=../evil.py").status_code == 400
+
+
+def test_ui_static_served_with_no_cache_headers():
+    """The console bundle must never be served stale: browsers revalidate and
+    pick up UI updates without a hard refresh."""
+    from api.routes import app as real_app
+
+    client = TestClient(real_app)
+    for path in ("/ui/", "/ui/app.js"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert "no-cache" in response.headers.get("cache-control", ""), path

@@ -47,8 +47,24 @@ app.add_middleware(
 app.include_router(admin_router)
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that forces revalidation on every load.
+
+    Without a cache policy, browsers may serve a stale console bundle (old
+    app.js/index.html) even though the server was updated. ``no-cache`` keeps
+    ETag-based revalidation so UI changes appear on a normal reload.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 if _STATIC_DIR.exists():
-    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+    app.mount("/ui", _NoCacheStaticFiles(directory=_STATIC_DIR, html=True), name="ui")
 
 
 @app.get("/", include_in_schema=False)
