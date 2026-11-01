@@ -33,6 +33,15 @@ def _safe_path(workspace: Path, raw_path: str) -> Path:
     return target
 
 
+def safe_workspace_path(workspace: Path, raw_path: str) -> Path:
+    """Public path resolver: reject anything outside the workspace directory.
+
+    Used by the admin service for workspace browsing; tool handlers use
+    :func:`_safe_path` internally.
+    """
+    return _safe_path(workspace, raw_path)
+
+
 # --- tool handlers -----------------------------------------------------------
 
 def _handle_write_file(args: dict, workspace: Path) -> str:

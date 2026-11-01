@@ -48,6 +48,8 @@ class FakeCollection:
                     return False
                 elif field == "_id" and doc.get("_id") != value:
                     return False
+                elif field == "agent_id" and doc.get("agent_id") != value:
+                    return False
             return True
 
         return FakeCursor([d for d in self.docs if match(d)])
@@ -245,6 +247,69 @@ class AgentRegistryTest(unittest.TestCase):
         self.assertTrue(agent["name"].strip())
         self.assertNotEqual(agent["name"], "  ")
         self.assertIn("-", agent["name"])
+
+
+class AgentHistoryTest(unittest.TestCase):
+    def setUp(self):
+        self.coll = FakeCollection()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_record_run_and_list_runs_newest_first(self):
+        first = admin.record_run(
+            "ag_1", "build a diary", {"answer": "v1", "decisions": [], "tool_calls": [{"name": "write_file", "output": "[ok]"}], "workspace": "/w"},
+            collection=self.coll,
+        )
+        second = admin.record_run(
+            "ag_1", "fix the bug", {"answer": "v2", "decisions": [], "tool_calls": [], "workspace": "/w"},
+            collection=self.coll,
+        )
+        self.assertTrue(first["run_id"])
+        self.assertEqual(first["task"], "build a diary")
+        self.assertEqual(first["answer"], "v1")
+        self.assertEqual(first["status"], "completed")
+
+        runs = admin.list_runs("ag_1", collection=self.coll)
+        self.assertEqual([r["run_id"] for r in runs], [second["run_id"], first["run_id"]])
+        self.assertEqual(runs[0]["answer"], "v2")
+        self.assertEqual(runs[0]["tool_calls"], [])
+
+    def test_list_runs_scoped_to_agent(self):
+        admin.record_run("ag_1", "t1", {"answer": "a"}, collection=self.coll)
+        admin.record_run("ag_2", "t2", {"answer": "b"}, collection=self.coll)
+        runs = admin.list_runs("ag_1", collection=self.coll)
+        self.assertEqual([r["task"] for r in runs], ["t1"])
+
+    def test_list_workspace_files_returns_relative_paths_and_skips_caches(self):
+        ws = self.workspace / "ag_1"
+        ws.mkdir(parents=True)
+        (ws / "diary.py").write_text("print(1)")
+        (ws / "tests").mkdir(parents=True)
+        (ws / "tests" / "test_diary.py").write_text("def test(): pass")
+        (ws / "__pycache__").mkdir()
+        (ws / "__pycache__" / "diary.cpython-313.pyc").write_bytes(b"x")
+        (ws / ".pytest_cache").mkdir()
+        files = admin.list_workspace_files("ag_1", base=self.workspace)
+        paths = [f["path"] for f in files]
+        self.assertIn("diary.py", paths)
+        self.assertIn("tests/test_diary.py", paths)
+        self.assertNotIn("__pycache__/diary.cpython-313.pyc", paths)
+        entry = next(f for f in files if f["path"] == "diary.py")
+        self.assertEqual(entry["size"], 8)
+
+    def test_read_workspace_file_returns_content_and_blocks_escape(self):
+        ws = self.workspace / "ag_1"
+        ws.mkdir(parents=True)
+        (ws / "diary.py").write_text("print(1)")
+        content = admin.read_workspace_file("ag_1", "diary.py", base=self.workspace)
+        self.assertEqual(content, "print(1)")
+        with self.assertRaises(FileNotFoundError):
+            admin.read_workspace_file("ag_1", "missing.py", base=self.workspace)
+        with self.assertRaises(ValueError):
+            admin.read_workspace_file("ag_1", "../evil.txt", base=self.workspace)
 
 
 class _FakeGraph:
@@ -593,3 +658,72 @@ def test_agent_run_missing_agent_404(monkeypatch):
     monkeypatch.setattr(admin, "get_agent", lambda agent_id: None)
     response = _client.post("/api/admin/agents/nope/run", json={"task": "x"})
     assert response.status_code == 404
+
+
+def test_agent_run_records_history(monkeypatch):
+    agent = {"id": "ag_1", "name": "T", "system_prompt": "p", "tools": []}
+    monkeypatch.setattr(admin, "get_agent", lambda agent_id: agent)
+    calls = {}
+
+    async def fake_run(agent, task, graph):
+        return {"answer": "done", "decisions": [], "tool_calls": [], "workspace": "/w"}
+
+    def fake_record(agent_id, task, result):
+        calls["recorded"] = (agent_id, task, result)
+        return {"run_id": "r1"}
+
+    monkeypatch.setattr(admin, "run_agent", fake_run)
+    monkeypatch.setattr(admin, "record_run", fake_record)
+    response = _client.post("/api/admin/agents/ag_1/run", json={"task": "do it"})
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "r1"
+    agent_id, task, result = calls["recorded"]
+    assert agent_id == "ag_1" and task == "do it" and result["answer"] == "done"
+
+
+def test_agent_run_recording_failure_does_not_break_run(monkeypatch):
+    agent = {"id": "ag_1", "name": "T", "system_prompt": "p", "tools": []}
+    monkeypatch.setattr(admin, "get_agent", lambda agent_id: agent)
+
+    async def fake_run(agent, task, graph):
+        return {"answer": "done", "decisions": [], "tool_calls": []}
+
+    monkeypatch.setattr(admin, "run_agent", fake_run)
+    monkeypatch.setattr(admin, "record_run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
+    response = _client.post("/api/admin/agents/ag_1/run", json={"task": "do it"})
+    assert response.status_code == 200
+    assert response.json()["answer"] == "done"
+
+
+def test_agent_runs_route_lists_history(monkeypatch):
+    runs = [{"run_id": "r1", "task": "do it", "answer": "done", "status": "completed", "created_at": "t"}]
+    monkeypatch.setattr(admin, "list_runs", lambda agent_id, limit=20: runs)
+    response = _client.get("/api/admin/agents/ag_1/runs")
+    assert response.status_code == 200
+    assert response.json()["runs"] == runs
+    assert response.json()["agent_id"] == "ag_1"
+
+
+def test_workspace_routes_list_files_and_read_content(monkeypatch):
+    files = [{"path": "diary.py", "size": 8}]
+    monkeypatch.setattr(admin, "list_workspace_files", lambda agent_id, base=None: files)
+    listed = _client.get("/api/admin/agents/ag_1/workspace")
+    assert listed.status_code == 200
+    assert listed.json()["files"] == files
+
+    monkeypatch.setattr(admin, "read_workspace_file", lambda agent_id, path, base=None: "print(1)")
+    content = _client.get("/api/admin/agents/ag_1/workspace/file?path=diary.py")
+    assert content.status_code == 200
+    assert content.json()["content"] == "print(1)"
+
+    monkeypatch.setattr(
+        admin, "read_workspace_file",
+        lambda agent_id, path, base=None: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+    assert _client.get("/api/admin/agents/ag_1/workspace/file?path=nope.py").status_code == 404
+
+    monkeypatch.setattr(
+        admin, "read_workspace_file",
+        lambda agent_id, path, base=None: (_ for _ in ()).throw(ValueError("escapes")),
+    )
+    assert _client.get("/api/admin/agents/ag_1/workspace/file?path=../evil.py").status_code == 400

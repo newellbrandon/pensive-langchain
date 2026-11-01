@@ -1,12 +1,15 @@
 """Pensive admin REST API: memory curation, system prompt, and test agents."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from admin import service as admin
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -140,4 +143,30 @@ async def run_agent(agent_id: str, body: AgentRunRequest, request: Request) -> d
         raise _bad_request(exc)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    try:
+        record = admin.record_run(agent_id, body.task, result)
+        result = dict(result, run_id=record["run_id"])
+    except Exception:  # noqa: BLE001 — history is best-effort, never fails the run
+        logger.exception("Could not record agent run history")
     return result
+
+
+@router.get("/agents/{agent_id}/runs")
+async def list_agent_runs(agent_id: str) -> dict:
+    return {"agent_id": agent_id, "runs": admin.list_runs(agent_id)}
+
+
+@router.get("/agents/{agent_id}/workspace")
+async def agent_workspace(agent_id: str) -> dict:
+    return {"agent_id": agent_id, "files": admin.list_workspace_files(agent_id)}
+
+
+@router.get("/agents/{agent_id}/workspace/file")
+async def agent_workspace_file(agent_id: str, path: str) -> dict:
+    try:
+        content = admin.read_workspace_file(agent_id, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise _bad_request(exc)
+    return {"path": path, "content": content}
