@@ -238,7 +238,7 @@ LangSmith tracing is optional and controlled by environment variables in `.env`:
 | `LANGSMITH_API_KEY` | Your LangSmith API key |
 | `LANGSMITH_PROJECT` | Project name (default: `pensive`) |
 | `LANGSMITH_ENDPOINT` | API endpoint (default: `https://api.smith.langchain.com`) |
-| `USER_ID` | Optional fallback when not using OpenWebUI session headers |
+| `USER_ID` | Identity pin — when set, every client shares this memory scope (overrides forwarded OpenWebUI user headers and body `user`); leave empty for per-user memory |
 
 When `LANGSMITH_TRACING=true` and a valid `LANGSMITH_API_KEY` is set, traces appear at [smith.langchain.com](https://smith.langchain.com) under the configured project. Each chat request produces a top-level run with tags `pensive` and `chat`, `metadata.user_id` from the OpenWebUI user, plus `chat_id` / `session_id` when forwarded, including nested LangGraph node spans, OpenAI Responses API LLM calls, and `voyage_embed` embedding spans during memory search.
 

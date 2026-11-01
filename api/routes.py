@@ -94,7 +94,17 @@ def _resolve_user_id(
     request: ChatCompletionRequest,
     http_request: Request,
 ) -> str:
-    """Resolve OpenWebUI user id from forwarded session headers or request body."""
+    """Resolve the memory identity for a chat request.
+
+    ``USER_ID`` in ``.env`` acts as an identity PIN: when set, it wins over
+    everything (forwarded OpenWebUI headers, body user) so a deployment can
+    pin all clients to one stable memory scope. Without a pin, the forwarded
+    ``X-OpenWebUI-User-Id`` header is authoritative, then the body/metadata,
+    then the default user.
+    """
+    if Config.USER_ID:
+        return Config.USER_ID
+
     header_user_id = _header_value(http_request, Config.OPENWEBUI_USER_ID_HEADER)
     if header_user_id:
         return header_user_id
@@ -112,13 +122,10 @@ def _resolve_user_id(
         if request.metadata.get("user"):
             return str(request.metadata["user"])
 
-    if Config.USER_ID:
-        return Config.USER_ID
-
     # Fail open for generic OpenAI clients (e.g. an OpenCode coding harness) that
     # don't send a user identity, so requests are never rejected. Memory is then
-    # scoped under this stable default user. Override with USER_ID in .env for
-    # per-deployment separation.
+    # scoped under this stable default user. Set USER_ID in .env to PIN a single
+    # identity for every client.
     logger.warning("No user id from headers/body/Config; falling back to default user")
     return "default"
 
