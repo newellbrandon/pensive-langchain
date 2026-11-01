@@ -1,6 +1,8 @@
 """LangGraph workflow definition and compilation."""
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.graph import END, START, StateGraph
 
 from agent.nodes import (
@@ -12,6 +14,19 @@ from agent.nodes import (
 )
 from agent.state import AgentState
 from persistence.mongo import get_checkpointer, get_store
+
+_active_graph: Any = None
+
+
+def set_active_graph(graph: Any) -> None:
+    """Register the compiled graph for subagent execution (startup wiring)."""
+    global _active_graph
+    _active_graph = graph
+
+
+def active_graph() -> Any:
+    """The compiled graph subagents run on, or None before wiring."""
+    return _active_graph
 
 
 def build_graph():

@@ -476,6 +476,8 @@ async def _invoke_agent_step(
         "tool_choice": None,
         "tool_calls": [],
         "system_prompt": agent.get("system_prompt") or "",
+        # Subagents never see the spawn tool themselves — no nesting.
+        "offer_spawn_tool": False,
     }
     config: dict = {
         "configurable": {"thread_id": thread_id, "user_id": user_id},

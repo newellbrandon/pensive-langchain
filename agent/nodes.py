@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Literal
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 
+from admin import service as admin
 from agent.state import AgentState
 from memory import memories
 from utils.llm import get_responses_client
@@ -92,6 +94,13 @@ async def generate_response(state: AgentState) -> dict:
     Tool definitions from the harness are forwarded to the model so it can
     request read/write/execute operations; any tool calls it emits are relayed
     back to the client in the response.
+
+    When ``offer_spawn_tool`` is set (main-context chats only), the model is
+    also offered ``spawn_subagent``: a server-side tool that delegates a task
+    to an isolated subagent (own memory scope, workspace, and tools). The
+    subagent runs through this same graph with the spawn tool removed, so
+    nesting is impossible; only a short digest of its answer returns to the
+    primary context, keeping the conversation window clean.
     """
     query = _latest_user_message(state)
     memory_context = state.get("memory_context") or []
@@ -111,34 +120,223 @@ async def generate_response(state: AgentState) -> dict:
     prompt_messages.extend(transcript)
 
     client = get_responses_client()
-    try:
-        result = await client.acomplete(
-            prompt_messages,
-            tools=state.get("tools") or None,
-            tool_choice=state.get("tool_choice"),
-        )
-        content = result.text
-        tool_calls = result.tool_calls
-        if tool_calls:
-            reason = f"Requested {len(tool_calls)} tool call(s)."
-        else:
-            reason = f"Generated answer ({len(content)} chars)."
-    except Exception as exc:
-        detail = f"{type(exc).__name__}: {exc}"
-        logger.error("LLM generation failed: %s", detail)
-        content = (
-            "Sorry, I couldn't reach the language model. "
-            f"Error: {detail[:300]}"
-        )
-        tool_calls = []
-        reason = f"Generation failed: {detail[:200]}"
+    tools = _server_tools(state.get("tools") or None, bool(state.get("offer_spawn_tool")))
+    tool_choice = state.get("tool_choice")
+    spawn_budget = _SPAWN_BUDGET
 
+    content = ""
+    tool_calls: list[dict] = []
+    for _ in range(_SPAWN_ITERATION_LIMIT):
+        try:
+            result = await client.acomplete(
+                prompt_messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            logger.error("LLM generation failed: %s", detail)
+            content = (
+                "Sorry, I couldn't reach the language model. "
+                f"Error: {detail[:300]}"
+            )
+            reason = f"Generation failed: {detail[:200]}"
+            _emit_decision("generate_response", "respond", reason)
+            return _generate_result(
+                content,
+                [],
+                [{"step": "generate_response", "decision": "respond", "reason": reason}],
+            )
+
+        content = result.text
+        tool_calls = result.tool_calls or []
+        spawn_calls = [c for c in tool_calls if _call_name(c) == SPAWN_SUBAGENT_NAME]
+        relay_calls = [c for c in tool_calls if _call_name(c) != SPAWN_SUBAGENT_NAME]
+        if not spawn_calls:
+            break
+
+        # Execute spawns server-side and feed the digests back to the model.
+        handled, exhausted = spawn_calls[:spawn_budget], spawn_calls[spawn_budget:]
+        for call in handled:
+            digest = await _execute_spawn(call, state)
+            prompt_messages.append(
+                AIMessage(content="", tool_calls=[_to_langchain_tool_call(call)])
+            )
+            prompt_messages.append(
+                ToolMessage(content=digest, tool_call_id=call.get("id") or "")
+            )
+        for call in exhausted:
+            prompt_messages.append(
+                AIMessage(content="", tool_calls=[_to_langchain_tool_call(call)])
+            )
+            prompt_messages.append(
+                ToolMessage(
+                    content=(
+                        "[error] subagent budget exhausted: at most 2 spawn_subagent "
+                        "calls per turn; combine tasks or finish with what you have."
+                    ),
+                    tool_call_id=call.get("id") or "",
+                )
+            )
+            _emit_decision(
+                "spawn_subagent",
+                "skipped",
+                "budget exhausted: at most 2 spawn_subagent calls per turn",
+            )
+        spawn_budget = max(0, spawn_budget - len(handled))
+
+    if tool_calls:
+        reason = f"Requested {len(tool_calls)} tool call(s)."
+    else:
+        reason = f"Generated answer ({len(content)} chars)."
     _emit_decision("generate_response", "tool_calls" if tool_calls else "respond", reason)
     decision = {
         "step": "generate_response",
         "decision": "tool_calls" if tool_calls else "respond",
         "reason": reason,
     }
+    return _generate_result(content, relay_calls, [decision])
+
+
+def _call_name(call: dict) -> str:
+    return str(call.get("name") or "")
+
+
+SPAWN_SUBAGENT_NAME = "spawn_subagent"
+_SPAWN_ITERATION_LIMIT = 4
+_SPAWN_BUDGET = 2
+_SPAWN_DIGEST_ANSWER_LIMIT = 4000
+_SPAWN_DIGEST_OUTPUT_LIMIT = 200
+
+SPAWN_SUBAGENT_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": SPAWN_SUBAGENT_NAME,
+        "description": (
+            "Delegate a self-contained task to an isolated subagent. The subagent "
+            "gets its own memory scope, workspace, and tools (file editing, shell, "
+            "web search) so this conversation stays clean; only a short digest of "
+            "its final answer returns. Pass tools: [] for the defaults. At most 2 "
+            "spawns per turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "The full task for the subagent"},
+                "system_prompt": {"type": "string", "description": "Optional persona/instructions for the subagent"},
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Optional OpenAI function definitions; empty = built-in sandbox + web tools",
+                },
+            },
+            "required": ["task"],
+        },
+    },
+}
+
+
+def _server_tools(client_tools: list[dict] | None, offer_spawn: bool) -> list[dict]:
+    """Client tool defs plus the spawn tool (unless the client defines its own)."""
+    tools = [t for t in (client_tools or []) if isinstance(t, dict)]
+    if not offer_spawn:
+        return tools
+    has_spawn = any(
+        (t.get("function") or {}).get("name") == SPAWN_SUBAGENT_NAME
+        or t.get("name") == SPAWN_SUBAGENT_NAME
+        for t in tools
+    )
+    if not has_spawn:
+        tools.append(SPAWN_SUBAGENT_TOOL)
+    return tools
+
+
+async def _execute_spawn(call: dict, state: AgentState) -> str:
+    """Run one spawn_subagent call; returns the digest fed back to the model."""
+    # Imported here to avoid the agent.graph <-> agent.nodes import cycle.
+    from agent.graph import active_graph
+
+    try:
+        args = json.loads(call.get("arguments") or "{}")
+        if not isinstance(args, dict):
+            args = {}
+    except (ValueError, TypeError):
+        return (
+            "[error] spawn_subagent arguments are not valid JSON; reissue the "
+            "call with valid JSON (task is a string, tools optional)."
+        )
+
+    task = str(args.get("task") or "").strip()
+    if not task:
+        return "[error] spawn_subagent requires a non-empty 'task' string"
+    graph = active_graph()
+    if graph is None:
+        return "[error] subagent execution unavailable: the graph is not ready"
+
+    raw_tools = args.get("tools")
+    tools = (
+        [t for t in raw_tools if isinstance(t, dict)][:12]
+        if isinstance(raw_tools, list)
+        else None
+    )
+    agent_id = f"sub-{uuid.uuid4().hex[:12]}"
+    subagent = {
+        "id": agent_id,
+        "name": admin.autogen_agent_name(),
+        "system_prompt": str(args.get("system_prompt") or "").strip()
+        or (
+            "You are a focused subagent that completes the delegated task using "
+            "the available tools. Work autonomously, verify your result, and give "
+            "a concise final answer."
+        ),
+        "tools": tools or admin.DEFAULT_AGENT_TOOLS,
+    }
+    try:
+        result = await admin.run_agent(subagent, task, graph)
+    except Exception as exc:
+        logger.exception("subagent execution failed")
+        return f"[error] subagent run failed: {type(exc).__name__}: {exc}"
+    try:
+        admin.record_run(agent_id, task, result)
+    except Exception:
+        logger.exception("could not record subagent run history")
+
+    answer = str(result.get("answer") or "")[:_SPAWN_DIGEST_ANSWER_LIMIT]
+    calls = result.get("tool_calls") or []
+    summary = "\n".join(
+        f"- {c.get('name')}: {str(c.get('output') or '')[: _SPAWN_DIGEST_OUTPUT_LIMIT]}"
+        for c in calls
+    )
+    _emit_decision(
+        "spawn_subagent",
+        "ok",
+        f"subagent {agent_id} finished: {len(calls)} tool call(s), "
+        f"answer {len(answer)} chars",
+    )
+    return (
+        f"[ok] subagent {agent_id} ({subagent['name']}) finished after "
+        f"{len(calls)} executed tool call(s); full artifacts are in its workspace "
+        f"({result.get('workspace') or 'n/a'}).\n"
+        f"SUBAGENT ANSWER:\n{answer}\n"
+        + (f"TOOL ACTIVITY:\n{summary}\n" if summary else "")
+    )
+
+
+def _to_langchain_tool_call(call: dict) -> dict:
+    """Convert a model tool call (id/name/arguments) to LangChain form for replay."""
+    try:
+        args = json.loads(call.get("arguments") or "{}")
+    except (ValueError, TypeError):
+        args = {}
+    return {
+        "id": call.get("id") or "",
+        "name": call.get("name") or "",
+        "args": args if isinstance(args, dict) else {},
+    }
+
+
+def _generate_result(content: str, tool_calls: list[dict], decisions: list[dict]) -> dict:
+    """Build the generate node's return value."""
     assistant_message = AIMessage(content=content)
     if tool_calls:
         assistant_message = AIMessage(
@@ -156,7 +354,7 @@ async def generate_response(state: AgentState) -> dict:
         "response": content,
         "tool_calls": tool_calls,
         "messages": [assistant_message],
-        "decisions": [decision],
+        "decisions": decisions,
     }
 
 
