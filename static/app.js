@@ -407,23 +407,33 @@ async function renderAgentRuns(agent, container) {
 function runItem(agent, run) {
   const item = document.createElement("details");
   item.className = "run-item";
-  const taskPreview = run.task.length > 90 ? run.task.slice(0, 90) + "…" : run.task;
+  const taskPreview = run.task.length > 70 ? run.task.slice(0, 70) + "…" : run.task;
   item.innerHTML = `
     <summary>
       <span class="run-task">${esc(taskPreview)}</span>
       <span class="run-when">${fmtWhen(run.created_at)} · ${esc(run.status)}</span>
+      <button class="btn small run-again" data-action="rerun">Run again</button>
     </summary>
     <div class="run-detail">
       ${run.answer ? `<p class="answer">${esc(run.answer)}</p>` : `<p class="decisions">(no answer text)</p>`}
-      ${run.tool_calls && run.tool_calls.length
-        ? `<details class="run-tools"><summary>${run.tool_calls.length} executed tool call(s)</summary><pre class="tool-log">${esc(JSON.stringify(run.tool_calls, null, 2))}</pre></details>`
-        : ""}
+      ${renderRunSteps(run)}
       <div class="workspace-block">
         <button class="btn small" data-action="files">Show workspace files</button>
         <div class="files-list"></div>
       </div>
     </div>
   `;
+
+  const rerunButton = item.querySelector('[data-action="rerun"]');
+  rerunButton.addEventListener("click", (event) => {
+    event.preventDefault(); // don't toggle the run item itself
+    event.stopPropagation();
+    const card = item.closest(".agent-card");
+    const box = card.querySelector(".run-box input");
+    const runButton = card.querySelector('[data-action="run"]');
+    box.value = run.task;
+    runButton.click();
+  });
 
   const filesButton = item.querySelector('[data-action="files"]');
   const filesList = item.querySelector(".files-list");
@@ -441,6 +451,41 @@ function runItem(agent, run) {
   });
 
   return item;
+}
+
+function renderRunSteps(run) {
+  const steps = run.steps || [];
+  if (!steps.length) {
+    // Runs recorded before step transcripts fall back to the call summary.
+    return run.tool_calls && run.tool_calls.length
+      ? `<details class="run-tools"><summary>${run.tool_calls.length} executed tool call(s)</summary><pre class="tool-log">${esc(JSON.stringify(run.tool_calls, null, 2))}</pre></details>`
+      : "";
+  }
+  return steps
+    .map((step, i) => {
+      const calls = step.tool_calls || [];
+      const decisions = (step.decisions || [])
+        .map((d) => `• ${cap(String(d.step || "").replaceAll("_", " "))}: ${d.decision} — ${d.reason}`)
+        .join("<br>");
+      const callHtml = calls
+        .map((call) => `
+          <div class="step-call">
+            <div class="step-call-name">${esc(call.name)}</div>
+            <span class="step-call-label">arguments</span>
+            <pre class="tool-log">${esc(String(call.arguments || ""))}</pre>
+            <span class="step-call-label">result</span>
+            <pre class="tool-log">${esc(String(call.output || ""))}</pre>
+          </div>`)
+        .join("");
+      return `
+        <details class="run-step">
+          <summary>Step ${i + 1} — ${calls.length ? `${calls.length} tool call(s) executed` : "responded"}</summary>
+          ${step.response ? `<p class="decisions">model: ${esc(step.response)}</p>` : ""}
+          ${decisions ? `<p class="decisions">${decisions}</p>` : ""}
+          ${callHtml}
+        </details>`;
+    })
+    .join("");
 }
 
 async function renderWorkspaceFiles(agent, files, container) {

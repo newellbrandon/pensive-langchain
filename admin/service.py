@@ -320,6 +320,7 @@ def _public_run(doc: dict) -> dict:
         "answer": doc.get("answer") or "",
         "decisions": doc.get("decisions") or [],
         "tool_calls": doc.get("tool_calls") or [],
+        "steps": doc.get("steps") or [],
         "workspace": doc.get("workspace") or "",
         "status": doc.get("status") or "",
         "created_at": doc.get("created_at"),
@@ -345,6 +346,7 @@ def record_run(
         "answer": str(result.get("answer") or "")[:20000],
         "decisions": (result.get("decisions") or [])[:50],
         "tool_calls": (result.get("tool_calls") or [])[:50],
+        "steps": (result.get("steps") or [])[:40],
         "workspace": str(result.get("workspace") or ""),
         "status": "completed",
         "created_at": _now(),
@@ -533,6 +535,7 @@ async def run_agent(
     transcript: list = [HumanMessage(content=task)]
     decisions_all: list[dict] = []
     executed_calls: list[dict] = []
+    steps: list[dict] = []
     answer = ""
     tool_calls: list[dict] = []
 
@@ -564,6 +567,7 @@ async def run_agent(
                 tool_calls=[_to_langchain_tool_call(call) for call in tool_calls],
             )
         )
+        step_calls: list[dict] = []
         for call in tool_calls:
             executed = execute_tool_call(call, workspace)
             executed_calls.append(
@@ -573,13 +577,30 @@ async def run_agent(
                     "output": executed["output"][:500],
                 }
             )
+            step_calls.append(
+                {
+                    "name": executed["name"],
+                    # Full payloads (bounded) so the UI can replay exactly what
+                    # the agent did at each step.
+                    "arguments": str(call.get("arguments") or "")[:12000],
+                    "output": executed["output"][:8000],
+                }
+            )
             transcript.append(
                 ToolMessage(content=executed["output"], tool_call_id=call.get("id") or "")
             )
+        steps.append(
+            {
+                "response": answer[:2000],
+                "decisions": decisions[:10],
+                "tool_calls": step_calls,
+            }
+        )
 
     return {
         "answer": answer,
         "decisions": decisions_all,
         "tool_calls": executed_calls,
+        "steps": steps,
         "workspace": str(workspace),
     }
