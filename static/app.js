@@ -296,6 +296,11 @@ function toolCount(tools) {
   return Array.isArray(tools) ? tools.length : 0;
 }
 
+function fmtSize(bytes) {
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return bytes + " B";
+}
+
 function agentCard(agent) {
   const div = document.createElement("div");
   div.className = "agent-card";
@@ -304,6 +309,7 @@ function agentCard(agent) {
     <div class="agent-head">
       <span class="agent-name">${esc(agent.name)}</span>
       <span class="agent-meta">id ${esc(agent.id)} · ${toolCount(agent.tools)} tool(s) · memory scope agent:${esc(agent.id)}</span>
+      <button class="btn small" data-action="edit">Edit</button>
       <button class="btn danger small" data-action="delete">Delete</button>
     </div>
     <div class="agent-prompt">${promptPreview}</div>
@@ -312,11 +318,22 @@ function agentCard(agent) {
       <button class="btn primary small" data-action="run">Run in isolation</button>
     </div>
     <div class="run-result" hidden></div>
+    <details class="agent-runs">
+      <summary>Runs &amp; artifacts</summary>
+      <div class="runs-list"></div>
+    </details>
   `;
 
   const resultBox = div.querySelector(".run-result");
   const taskInput = div.querySelector(".run-box input");
   const runButton = div.querySelector('[data-action="run"]');
+  const runsDetails = div.querySelector(".agent-runs");
+  const runsBox = div.querySelector(".runs-list");
+
+  // History loads lazily the first time the section is opened.
+  runsDetails.addEventListener("toggle", () => {
+    if (runsDetails.open && !runsBox.dataset.loaded) renderAgentRuns(agent, runsBox);
+  });
 
   runButton.addEventListener("click", async () => {
     const task = taskInput.value.trim();
@@ -336,7 +353,7 @@ function agentCard(agent) {
         .map((d) => `• ${cap(String(d.step || "").replaceAll("_", " "))}: ${d.decision} — ${d.reason}`)
         .join("<br>");
       const toolCalls = result.tool_calls && result.tool_calls.length
-        ? `<details><summary>${result.tool_calls.length} tool call(s) requested</summary>${esc(JSON.stringify(result.tool_calls, null, 2))}</details>`
+        ? `<details><summary>${result.tool_calls.length} tool call(s) executed</summary>${esc(JSON.stringify(result.tool_calls, null, 2))}</details>`
         : "";
       resultBox.innerHTML = `
         ${result.workspace ? `<p class="decisions">workspace: <code>${esc(result.workspace)}</code></p>` : ""}
@@ -344,6 +361,7 @@ function agentCard(agent) {
         ${toolCalls}
         <p class="decisions">${decisionLines || "no decisions recorded"}</p>
       `;
+      if (runsDetails.open) renderAgentRuns(agent, runsBox);
     } catch (error) {
       resultBox.innerHTML = `<p class="decisions" style="color:var(--danger)">${esc(error.message)}</p>`;
     } finally {
@@ -351,10 +369,13 @@ function agentCard(agent) {
     }
   });
 
+  div.querySelector('[data-action="edit"]').addEventListener("click", () => startEdit(agent));
+
   div.querySelector('[data-action="delete"]').addEventListener("click", async () => {
-    if (!confirm(`Delete agent “${agent.name}”? Its isolated memories remain in MongoDB.`)) return;
+    if (!confirm(`Delete agent “${agent.name}”? Its isolated memories and run history remain in MongoDB.`)) return;
     try {
       await api(`/api/admin/agents/${encodeURIComponent(agent.id)}`, { method: "DELETE" });
+      if (editingAgentId === agent.id) cancelEdit();
       toast("Agent deleted");
       loadAgents();
     } catch (error) {
@@ -363,6 +384,128 @@ function agentCard(agent) {
   });
 
   return div;
+}
+
+async function renderAgentRuns(agent, container) {
+  container.dataset.loaded = "1";
+  container.innerHTML = `<p class="decisions">Loading runs…</p>`;
+  try {
+    const data = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/runs`);
+    container.innerHTML = "";
+    if (!data.runs.length) {
+      container.innerHTML = `<div class="empty">No runs yet — paste a task above and run the agent.</div>`;
+      return;
+    }
+    for (const run of data.runs) {
+      container.appendChild(runItem(agent, run));
+    }
+  } catch (error) {
+    container.innerHTML = `<div class="empty">Could not load runs: ${esc(error.message)}</div>`;
+  }
+}
+
+function runItem(agent, run) {
+  const item = document.createElement("details");
+  item.className = "run-item";
+  const taskPreview = run.task.length > 90 ? run.task.slice(0, 90) + "…" : run.task;
+  item.innerHTML = `
+    <summary>
+      <span class="run-task">${esc(taskPreview)}</span>
+      <span class="run-when">${fmtWhen(run.created_at)} · ${esc(run.status)}</span>
+    </summary>
+    <div class="run-detail">
+      ${run.answer ? `<p class="answer">${esc(run.answer)}</p>` : `<p class="decisions">(no answer text)</p>`}
+      ${run.tool_calls && run.tool_calls.length
+        ? `<details class="run-tools"><summary>${run.tool_calls.length} executed tool call(s)</summary><pre class="tool-log">${esc(JSON.stringify(run.tool_calls, null, 2))}</pre></details>`
+        : ""}
+      <div class="workspace-block">
+        <button class="btn small" data-action="files">Show workspace files</button>
+        <div class="files-list"></div>
+      </div>
+    </div>
+  `;
+
+  const filesButton = item.querySelector('[data-action="files"]');
+  const filesList = item.querySelector(".files-list");
+  filesButton.addEventListener("click", async () => {
+    filesButton.disabled = true;
+    try {
+      const data = await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/workspace`);
+      filesButton.hidden = true;
+      renderWorkspaceFiles(agent, data.files, filesList);
+    } catch (error) {
+      filesList.innerHTML = `<span class="decisions">${esc(error.message)}</span>`;
+    } finally {
+      filesButton.disabled = false;
+    }
+  });
+
+  return item;
+}
+
+async function renderWorkspaceFiles(agent, files, container) {
+  container.innerHTML = "";
+  if (!files.length) {
+    container.innerHTML = `<span class="decisions">no files in workspace yet</span>`;
+    return;
+  }
+  for (const file of files) {
+    const row = document.createElement("div");
+    row.className = "file-entry";
+    row.innerHTML = `<button class="file-name">${esc(file.path)}</button><span class="file-size">${fmtSize(file.size)}</span>`;
+    const preview = document.createElement("pre");
+    preview.className = "file-content";
+    preview.hidden = true;
+    row.querySelector(".file-name").addEventListener("click", async () => {
+      if (preview.hidden) {
+        try {
+          const data = await api(
+            `/api/admin/agents/${encodeURIComponent(agent.id)}/workspace/file?path=${encodeURIComponent(file.path)}`
+          );
+          preview.textContent = data.content;
+        } catch (error) {
+          preview.textContent = `error: ${error.message}`;
+        }
+        preview.hidden = false;
+      } else {
+        preview.hidden = true;
+      }
+    });
+    row.appendChild(preview);
+    container.appendChild(row);
+  }
+}
+
+/* ---------- edit mode ---------- */
+
+let editingAgentId = null;
+
+function setEditMode(agent) {
+  editingAgentId = agent ? agent.id : null;
+  document.getElementById("agent-form-title").textContent = agent
+    ? `Edit agent — ${agent.name}`
+    : "Create agent";
+  document.getElementById("create-agent").textContent = agent ? "Save changes" : "Create agent";
+  document.getElementById("cancel-edit").hidden = !agent;
+}
+
+function startEdit(agent) {
+  document.getElementById("agent-name").value = agent.name || "";
+  document.getElementById("agent-prompt").value = agent.system_prompt || "";
+  document.getElementById("agent-tools").value =
+    Array.isArray(agent.tools) && agent.tools.length ? JSON.stringify(agent.tools, null, 2) : "";
+  setEditMode(agent);
+  document
+    .getElementById("agent-name")
+    .scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("agent-name").focus();
+}
+
+function cancelEdit() {
+  document.getElementById("agent-name").value = "";
+  document.getElementById("agent-prompt").value = "";
+  document.getElementById("agent-tools").value = "";
+  setEditMode(null);
 }
 
 document.getElementById("create-agent").addEventListener("click", async () => {
@@ -383,19 +526,27 @@ document.getElementById("create-agent").addEventListener("click", async () => {
     }
   }
   try {
-    await api("/api/admin/agents", {
-      method: "POST",
-      body: JSON.stringify({ name, system_prompt, tools }),
-    });
-    toast(`Agent “${name}” created`);
-    document.getElementById("agent-name").value = "";
-    document.getElementById("agent-prompt").value = "";
-    document.getElementById("agent-tools").value = "";
+    if (editingAgentId) {
+      await api(`/api/admin/agents/${encodeURIComponent(editingAgentId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ name, system_prompt, tools }),
+      });
+      toast(`Agent “${name}” updated`);
+    } else {
+      await api("/api/admin/agents", {
+        method: "POST",
+        body: JSON.stringify({ name, system_prompt, tools }),
+      });
+      toast(`Agent “${name}” created`);
+    }
+    cancelEdit();
     loadAgents();
   } catch (error) {
     toast(error.message, true);
   }
 });
+
+document.getElementById("cancel-edit").addEventListener("click", cancelEdit);
 
 /* ---------- boot ---------- */
 

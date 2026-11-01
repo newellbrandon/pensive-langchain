@@ -252,6 +252,57 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 .run-result .decisions { color: var(--muted); font-size: 12.5px; margin: 0; }
 .run-result summary { cursor: pointer; color: var(--green-2); font-size: 13px; margin-bottom: 6px; }
 
+.agent-runs { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+.agent-runs > summary { cursor: pointer; color: var(--green-2); font-size: 13px; font-weight: 600; }
+.runs-list { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.run-item { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
+.run-item > summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+.run-item .run-task { font-weight: 500; flex: 1; }
+.run-item .run-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.run-detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.run-detail .answer { white-space: pre-wrap; font-size: 13px; margin: 0 0 8px; }
+.run-tools summary { cursor: pointer; color: var(--green-2); font-size: 12.5px; }
+.tool-log {
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.workspace-block { margin-top: 8px; }
+.files-list { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.file-entry { display: flex; gap: 10px; align-items: baseline; }
+.file-entry .file-name {
+  background: none;
+  border: none;
+  color: var(--green-2);
+  cursor: pointer;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  text-align: left;
+  padding: 0;
+}
+.file-entry .file-name:hover { text-decoration: underline; }
+.file-entry .file-size { color: var(--muted); font-size: 12px; }
+.file-content {
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 260px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0 0;
+}
+
 /* ---------- misc ---------- */
 .toast {
   position: fixed;

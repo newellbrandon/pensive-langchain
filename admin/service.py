@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import uuid
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from typing import Any, Collection, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, workspace_root
+from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, safe_workspace_path, workspace_root
 from config import Config
 from memory.memories import MEMORY_TYPES, namespace
 from persistence.mongo import get_client, get_store
@@ -73,6 +74,12 @@ def _agents_collection(collection: Collection | None = None) -> Collection:
     if collection is not None:
         return collection
     return get_client()[Config.MONGODB_DB]["pensive_agents"]
+
+
+def _runs_collection(collection: Collection | None = None) -> Collection:
+    if collection is not None:
+        return collection
+    return get_client()[Config.MONGODB_DB]["pensive_agent_runs"]
 
 
 def _resolve_store(store) -> Any:
@@ -301,6 +308,109 @@ def delete_agent(agent_id: str, *, collection: Collection | None = None) -> bool
     result = _agents_collection(collection).delete_one({"_id": agent_id})
     count = getattr(result, "deleted_count", result)
     return int(count or 0) > 0
+
+
+# --- run history -------------------------------------------------------------
+
+def _public_run(doc: dict) -> dict:
+    return {
+        "run_id": doc.get("_id") or "",
+        "agent_id": doc.get("agent_id") or "",
+        "task": doc.get("task") or "",
+        "answer": doc.get("answer") or "",
+        "decisions": doc.get("decisions") or [],
+        "tool_calls": doc.get("tool_calls") or [],
+        "workspace": doc.get("workspace") or "",
+        "status": doc.get("status") or "",
+        "created_at": doc.get("created_at"),
+    }
+
+
+def record_run(
+    agent_id: str,
+    task: str,
+    result: dict,
+    *,
+    collection: Collection | None = None,
+) -> dict:
+    """Persist a completed agent run so past work can be reviewed and re-run.
+
+    The result is stored with bounded sizes (executed tool-call outputs are
+    already truncated by the executor) so history stays light.
+    """
+    doc = {
+        "_id": uuid.uuid4().hex[:12],
+        "agent_id": agent_id,
+        "task": str(task or "")[:2000],
+        "answer": str(result.get("answer") or "")[:20000],
+        "decisions": (result.get("decisions") or [])[:50],
+        "tool_calls": (result.get("tool_calls") or [])[:50],
+        "workspace": str(result.get("workspace") or ""),
+        "status": "completed",
+        "created_at": _now(),
+    }
+    _runs_collection(collection).insert_one(doc)
+    return _public_run(doc)
+
+
+def list_runs(
+    agent_id: str,
+    limit: int = 20,
+    *,
+    collection: Collection | None = None,
+) -> list[dict]:
+    """Agent runs, newest first."""
+    docs = _runs_collection(collection).find({"agent_id": agent_id})
+    docs = sorted(docs, key=lambda d: d.get("created_at") or "", reverse=True)
+    return [_public_run(d) for d in docs[:limit]]
+
+
+# --- workspace browsing ------------------------------------------------------
+
+_SKIP_WORKSPACE_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"}
+
+
+def list_workspace_files(
+    agent_id: str,
+    *,
+    base: Path | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Flat listing of the agent's workspace: relative paths + byte sizes."""
+    workspace = workspace_root(agent_id, base=base)
+    if not workspace.exists():
+        return []
+    files: list[dict] = []
+    for dirpath, dirnames, filenames in os.walk(workspace):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_WORKSPACE_DIRS)
+        rel_dir = Path(dirpath).relative_to(workspace)
+        for filename in sorted(filenames):
+            if filename.endswith(".pyc"):
+                continue
+            full = Path(dirpath) / filename
+            try:
+                size = full.stat().st_size
+            except OSError:
+                size = 0
+            rel = filename if str(rel_dir) == "." else (rel_dir / filename).as_posix()
+            files.append({"path": rel, "size": size})
+            if len(files) >= limit:
+                return files
+    return files
+
+
+def read_workspace_file(
+    agent_id: str,
+    rel_path: str,
+    *,
+    base: Path | None = None,
+) -> str:
+    """Read a file from the agent workspace (path escapes are rejected)."""
+    workspace = workspace_root(agent_id, base=base)
+    path = safe_workspace_path(workspace, rel_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"workspace file not found: {rel_path}")
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _to_langchain_tool_call(call: dict) -> dict:
