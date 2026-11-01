@@ -577,6 +577,49 @@ class TestContextPreservation:
         )
         req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="hi")])
         assert _resolve_user_id(req, http) == "default"
+
+    def test_user_id_pin_overrides_forwarded_headers(self, monkeypatch):
+        from api.models import ChatCompletionRequest
+        from starlette.datastructures import Headers
+
+        monkeypatch.setattr(Config, "USER_ID", "default")
+        http = FastAPIRequest(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "headers": Headers({"X-OpenWebUI-User-Id": "some-uuid"}).raw,
+                "query_string": b"",
+                "server": ("", 80),
+                "client": ("", 0),
+                "scheme": "http",
+            }
+        )
+        # Pin wins even against a forwarded OpenWebUI header + body user.
+        req = ChatCompletionRequest(
+            messages=[ChatMessage(role="user", content="hi")], user="body-user"
+        )
+        assert _resolve_user_id(req, http) == "default"
+
+    def test_forwarded_header_used_when_pin_unset(self, monkeypatch):
+        from api.models import ChatCompletionRequest
+        from starlette.datastructures import Headers
+
+        monkeypatch.setattr(Config, "USER_ID", "")
+        http = FastAPIRequest(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "headers": Headers({"X-OpenWebUI-User-Id": "some-uuid"}).raw,
+                "query_string": b"",
+                "server": ("", 80),
+                "client": ("", 0),
+                "scheme": "http",
+            }
+        )
+        req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="hi")])
+        assert _resolve_user_id(req, http) == "some-uuid"
     def test_chat_messages_preserve_all_roles(self):
         msgs = [
             ChatMessage(role="system", content="You edit code."),
