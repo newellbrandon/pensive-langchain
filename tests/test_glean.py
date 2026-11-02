@@ -234,7 +234,7 @@ class GleanClientTest(unittest.TestCase):
 
     def test_list_tools_connects_and_snapshots(self):
         session = FakeMCPSession(
-            tools=[{"name": "search", "description": "Search Glean", "inputSchema": {"type": "object"}}]
+            tools=[{"name": "search", "description": "Search Glean", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}]
         )
         client = self.make_client(session=session)
         tools = _run(client.list_tools())
@@ -242,6 +242,31 @@ class GleanClientTest(unittest.TestCase):
         self.assertTrue(session.initialized)
         # snapshot served without a new connection
         self.assertEqual(client.tool_schemas()[0]["function"]["name"], "glean_search")
+
+    def test_list_tools_reads_snake_case_input_schema(self):
+        # The mcp SDK exposes the schema as Tool.input_schema; reading the
+        # camelCase alias yields nothing and collapses parameters to {} —
+        # which is exactly why the model called glean_search with no query.
+        class _SdkTool:
+            name = "search"
+            description = "Search Glean"
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["query"],
+            }
+
+        session = FakeMCPSession(tools=[_SdkTool()])
+        client = self.make_client(session=session)
+        _run(client.list_tools())
+        params = client.tool_schemas()[0]["function"]["parameters"]
+        self.assertEqual(
+            sorted(params["properties"].keys()), ["count", "query"]
+        )
+        self.assertEqual(params["required"], ["query"])
 
     def test_call_tool_returns_ok_formatted_result(self):
         client = self.make_client(
