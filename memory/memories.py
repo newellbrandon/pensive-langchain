@@ -70,6 +70,9 @@ _JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
 # embeddings are available, token overlap clears MEMORY_MERGE_OVERLAP.
 MEMORY_MERGE_SCORE = 0.85
 MEMORY_MERGE_OVERLAP = 0.6
+# Within a merged memory, two lines that overlap this much are THE SAME
+# sentence — keep the longer/fuller version instead of listing both.
+MEMORY_LINE_MERGE_OVERLAP = 0.75
 _WORD_SPLIT = re.compile(r"[^a-z0-9']+", re.I)
 
 
@@ -79,18 +82,69 @@ def normalize_label(label: str) -> str:
     return _WORD_SPLIT.sub(" ", str(label or "")).strip().lower()
 
 
+def _token_containment(a: str, b: str) -> float:
+    """Fraction of the shorter text's tokens present in the longer one —
+    the right measure for 'same sentence with a longer tail' variants."""
+    tokens_a = {t for t in _WORD_SPLIT.split(str(a).lower()) if t}
+    tokens_b = {t for t in _WORD_SPLIT.split(str(b).lower()) if t}
+    shorter = min(len(tokens_a), len(tokens_b))
+    if not shorter:
+        return 0.0
+    return len(tokens_a & tokens_b) / shorter
+
+
 def merge_texts(existing: str, new: str) -> str:
-    """Combine two memory texts into one curated memory: existing lines kept
-    first, then any NEW lines that are not already present."""
-    lines: list[str] = []
-    seen: set[str] = set()
-    for line in str(existing or "").splitlines() + str(new or "").splitlines():
-        clean = line.strip()
-        if not clean or clean.lower() in seen:
+    """Combine two memory texts into ONE curated memory: exact and
+    near-identical lines collapse to their longer/fuller version (token
+    containment >= MEMORY_LINE_MERGE_OVERLAP), so a repetition with a longer
+    tail doesn't produce duplicate line items; distinct facts are always
+    kept; source order is preserved."""
+    lines = [l.strip() for l in str(existing or "").splitlines() + str(new or "").splitlines() if l.strip()]
+    if not lines:
+        return ""
+    # Longest-first so a shorter variant gets dropped in favor of its fuller
+    # version; then restore original order (first occurrence wins).
+    kept: list[str] = []
+    for line in sorted(set(lines), key=lambda l: (-len(l), l)):
+        if any(_token_containment(line, k) >= MEMORY_LINE_MERGE_OVERLAP for k in kept):
             continue
-        seen.add(clean.lower())
-        lines.append(clean)
-    return "\n".join(lines)
+        kept.append(line)
+    order: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        order.setdefault(line, i)
+    kept.sort(key=lambda line: order[line])
+    return "\n".join(kept)
+
+
+CONSOLIDATE_PROMPT = (
+    "Merge the following memory fragments — they all describe the same concept — "
+    "into ONE concise, complete memory. Keep every distinct fact, drop repeated "
+    "or overlapping wording, do not invent new facts, do not use lists or bullets. "
+    "Reply with the merged memory text only.\n\nFRAGMENTS:\n{texts}"
+)
+
+
+async def consolidate_memories(client: Any, texts: list[str]) -> str:
+    """LLM polish: fold near-duplicate memory fragments into one flowing
+    curated memory. Returns "" on failure so callers fall back to the
+    heuristic merge result."""
+    fragments = [f"- {t.strip()}" for t in texts if str(t).strip()]
+    if not fragments:
+        return ""
+    try:
+        raw = await client.agenerate(
+            [
+                SystemMessage(content=CONSOLIDATE_PROMPT.format(texts="\n".join(fragments))),
+                HumanMessage(content="Merge."),
+            ]
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Memory consolidation failed")
+        return ""
+    text = str(raw or "").strip()
+    if len(text) < 20:
+        return ""
+    return text
 
 
 def lexical_similarity(a: str, b: str) -> float:

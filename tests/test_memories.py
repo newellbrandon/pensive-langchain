@@ -312,6 +312,30 @@ class SaveTest(unittest.TestCase):
         self.assertEqual(mem.merge_texts("alpha\ngamma", "beta\nalpha"), "alpha\ngamma\nbeta")
         self.assertEqual(mem.merge_texts("", "new"), "new")
 
+    def test_merge_texts_collapses_near_identical_lines_keeping_longer(self):
+        merged = mem.merge_texts(
+            "Prefers to create files and run tests automatically",
+            "Prefers to create files and run tests automatically without further questions",
+        )
+        # one line — the fuller version — not a literal concatenation
+        self.assertEqual(merged.count("\n"), 0)
+        self.assertIn("without further questions", merged)
+        self.assertNotIn("automatically\n", merged)
+
+    def test_merge_texts_keeps_distinct_facts(self):
+        merged = mem.merge_texts("Likes dark mode", "Works at MongoDB")
+        self.assertEqual(merged, "Likes dark mode\nWorks at MongoDB")
+
+    def test_consolidate_memories_returns_llm_polish(self):
+        client = FakeClient('"CSX batches data every 30 minutes and needs near-real-time intelligence."')
+        text = _run(mem.consolidate_memories(client, ["CSX batches at 30-minute intervals", "CSX needs near-real-time intelligence"]))
+        self.assertIn("30 minutes", text)
+
+    def test_consolidate_memories_falls_back_on_failure(self):
+        client = FakeClient(RuntimeError("model down"))
+        text = _run(mem.consolidate_memories(client, ["some fragment"]))
+        self.assertEqual(text, "")
+
     def test_lexical_similarity_compares_token_overlap(self):
         self.assertEqual(mem.lexical_similarity("a b c", "a b c"), 1.0)
         self.assertEqual(mem.lexical_similarity("a b", "c d"), 0.0)

@@ -22,11 +22,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, safe_workspace_path, workspace_root
 from glean.client import get_glean_client
+from utils.llm import get_responses_client
 from config import Config
 from memory.memories import (
     MEMORY_MERGE_OVERLAP,
     MEMORY_MERGE_SCORE,
     MEMORY_TYPES,
+    _token_containment,
+    consolidate_memories,
     lexical_similarity,
     merge_texts,
     namespace,
@@ -276,7 +279,7 @@ def _similar_memory_peers(
     return peers
 
 
-def merge_duplicate_memories(
+async def merge_duplicate_memories(
     user_id: str = DEFAULT_USER_ID,
     mem_type: Optional[str] = None,
     *,
@@ -285,15 +288,19 @@ def merge_duplicate_memories(
 ) -> dict:
     """Query all semantically similar memories together and curate each group
     into ONE complete memory: the most recently updated record is the anchor
-    (its key, label, and newest position), the group's contents are merged
-    into it, and the duplicate copies are deleted. Returns scan/merge/removal
-    counts. Vector similarity with a lexical fallback when embeddings are
-    unavailable."""
+    (its key, label, and newest position), near-identical lines collapse
+    heuristically (longer version wins), an LLM consolidation pass folds the
+    group's fragments into one flowing curated memory (best-effort; the
+    heuristic result stands if the model fails), and the duplicate copies are
+    deleted. Returns scan/merge/removal counts. Similarity detection uses
+    vector search with a lexical fallback when embeddings are unavailable."""
     store_resolved = _resolve_store(store)
     types = [mem_type] if mem_type else list(MEMORY_TYPES)
+    client = get_responses_client()
     scanned = 0
     merged = 0
     removed = 0
+    polished = 0
     for mem_type_current in types:
         rows = list_memories(user_id, mem_type_current, collection=collection)
         grouped: set = set()
@@ -303,19 +310,58 @@ def merge_duplicate_memories(
             if key in grouped:
                 continue
             grouped.add(key)
+            content = row["content"] or ""
+            # Self-heal: a record that is itself a literal concatenation of
+            # near-identical fragments collapses to its fuller version; rows
+            # with suspiciously overlapping lines (paraphrase-level dupes)
+            # get the LLM consolidation pass so they read as ONE memory.
+            lines = [l.strip() for l in content.splitlines() if l.strip()]
+            if len(lines) > 1:
+                collapsed = lines[0]
+                for line in lines[1:]:
+                    collapsed = merge_texts(collapsed, line)
+                suspicious = any(
+                    _token_containment(a, b) >= 0.5
+                    for i, a in enumerate(lines)
+                    for b in lines[i + 1 :]
+                )
+                polished_text = ""
+                if suspicious or collapsed != content.strip():
+                    polished_text = await consolidate_memories(client, lines) or collapsed
+                if polished_text and polished_text != content.strip():
+                    content = "\n".join(l.strip() for l in polished_text.splitlines() if l.strip())
+                    polished += 1
+                    store_resolved.put(
+                        namespace(user_id, mem_type_current),
+                        key,
+                        {
+                            "content": content,
+                            "user_id": user_id,
+                            "type": mem_type_current,
+                            "label": row.get("label") or mem_type_current,
+                            "recorded_at": row.get("recorded_at"),
+                            "updated_at": _now(),
+                        },
+                    )
             peers = _similar_memory_peers(
-                store_resolved, user_id, mem_type_current, key, row["content"], rows, grouped
+                store_resolved, user_id, mem_type_current, key, content, rows, grouped
             )
             if not peers:
                 continue
             merged += 1
-            content = row["content"]
+            fragments = [content] + [p["content"] for p in peers]
             recorded_at = row.get("recorded_at")
             for peer in peers:
-                content = merge_texts(content, peer["content"])
                 recorded_at = recorded_at or peer.get("recorded_at")
                 grouped.add(peer["key"])
                 removed += 1
+            collapsed = fragments[0]
+            for fragment in fragments[1:]:
+                collapsed = merge_texts(collapsed, fragment)
+            # LLM polish: fold the collapsed fragments into one curated memory
+            polished_text = await consolidate_memories(client, fragments)
+            content = polished_text or collapsed
+            content = "\n".join(l.strip() for l in content.splitlines() if l.strip())
             store_resolved.put(
                 namespace(user_id, mem_type_current),
                 key,
@@ -330,7 +376,7 @@ def merge_duplicate_memories(
             )
             for peer in peers:
                 store_resolved.delete(namespace(user_id, mem_type_current), peer["key"])
-    return {"scanned": scanned, "merged": merged, "removed": removed}
+    return {"scanned": scanned, "merged": merged, "removed": removed, "polished": polished}
 
 
 # --- test agents -------------------------------------------------------------
