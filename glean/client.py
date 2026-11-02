@@ -169,9 +169,14 @@ class GleanClient:
             description = getattr(item, "description", None) or (
                 item.get("description") if isinstance(item, dict) else ""
             )
-            schema = getattr(item, "inputSchema", None) or (
-                item.get("inputSchema") if isinstance(item, dict) else {}
-            )
+            # The mcp SDK exposes the schema as Tool.input_schema (pydantic
+            # snake_case); the camelCase alias does not exist on the model,
+            # so reading only "inputSchema" collapsed every tool's parameters
+            # to {} and left the model guessing (frequently passing NO query).
+            if isinstance(item, dict):
+                schema = item.get("input_schema") or item.get("inputSchema") or {}
+            else:
+                schema = getattr(item, "input_schema", None) or getattr(item, "inputSchema", None) or {}
             if not name:
                 continue
             params = dict(schema) if isinstance(schema, dict) else {"type": "object"}

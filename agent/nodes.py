@@ -326,6 +326,7 @@ async def _execute_server_call(call: dict, state: AgentState) -> str:
             await get_glean_client().refresh_tools_if_stale()
         except Exception as exc:  # noqa: BLE001
             logger.warning("glean refresh failed: %s", exc)
+        logger.info("glean server call %s args=%s", name, json.dumps(args)[:400])
         return (await get_glean_client().call_tool(name, args))["output"]
     executed = execute_project_tool_call(call)
     return executed["output"]
