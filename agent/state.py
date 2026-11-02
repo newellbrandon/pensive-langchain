@@ -41,3 +41,6 @@ class AgentState(TypedDict):
     # from the merged state and agent runs report 0 tokens.
     tokens_in: int
     tokens_out: int
+    # Server-tool executions from the generate loop (spawn/glean/project):
+    # surfaced so run history aggregates them into steps and call totals.
+    server_tool_log: list[dict]

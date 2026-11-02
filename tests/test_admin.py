@@ -400,7 +400,7 @@ class AgentHistoryTest(unittest.TestCase):
                 "answer": "digest",
                 "decisions": [],
                 "tool_calls": [{"name": "glean_search", "output": "[ok]"}],
-                "steps": [],
+                "steps": [{"response": "", "decisions": [], "tool_calls": [{"name": "glean_search"}]}],
                 "workspace": "/w",
                 "tokens_in": 1200,
                 "tokens_out": 340,
@@ -422,6 +422,29 @@ class AgentHistoryTest(unittest.TestCase):
         legacy = admin.list_recent_runs(collection=self.coll)[-1]
         self.assertEqual(legacy["tokens_total"], 0)
         self.assertIsNone(legacy["duration_ms"])
+
+    def test_public_run_derives_call_counts_from_stored_steps(self):
+        # legacy runs recorded before the metrics existed still carry their
+        # step transcripts — aggregate tool calls + step counts from them
+        doc = self._run_doc("legacy1", "2026-09-01T00:00:00.000000+00:00")
+        doc["steps"] = [
+            {"response": "a", "decisions": [], "tool_calls": [{"name": "write_file"}, {"name": "run_command"}]},
+            {"response": "b", "decisions": [], "tool_calls": [{"name": "write_file"}]},
+        ]
+        self.coll.docs.append(doc)
+        run = admin.list_recent_runs(collection=self.coll)[0]
+        self.assertEqual(run["tool_call_count"], 3)
+        self.assertEqual(run["step_count"], 2)
+        # stored metrics win when present
+        doc2 = self._run_doc("new1", "2026-09-02T00:00:00.000000+00:00")
+        doc2.update(tool_call_count=9, step_count=4, tokens_in=10, tokens_out=2)
+        self.coll.docs.append(doc2)
+        run2 = admin.list_recent_runs(collection=self.coll)[0]
+        self.assertEqual(run2["tool_call_count"], 9)
+        self.assertEqual(run2["step_count"], 4)
+        # tokens/duration are unknowable for legacy runs — stay None
+        self.assertIsNone(run["tokens_in"])
+        self.assertEqual(run2["tokens_total"], 12)
 
     def test_list_recent_runs_sorts_by_metrics(self):
         base = datetime.now(timezone.utc)
@@ -549,6 +572,34 @@ class AgentRunTest(unittest.TestCase):
         self.assertIsInstance(result["duration_ms"], int)
         self.assertEqual(result["tool_call_count"], 0)
         self.assertEqual(result["step_count"], 0)
+
+    def test_run_aggregates_server_loop_calls_into_steps(self):
+        # tool calls executed inside generate_response's server loop (glean,
+        # spawn, project) must appear in the run's steps and call totals
+        graph = _FakeGraph(
+            final_state={
+                "response": "answer after glean",
+                "tool_calls": [],
+                "decisions": [],
+                "server_tool_log": [
+                    {
+                        "name": "glean_search",
+                        "arguments": '{"query": "The Home Depot"}',
+                        "output": "[ok] glean search returned:\nhit one",
+                    }
+                ],
+            }
+        )
+        result = _run(admin.run_agent(self.agent, "Search glean for HD", graph))
+        self.assertEqual(result["answer"], "answer after glean")
+        self.assertEqual(len(result["steps"]), 1)
+        step_calls = result["steps"][0]["tool_calls"]
+        self.assertEqual(step_calls[0]["name"], "glean_search")
+        self.assertIn("query", step_calls[0]["arguments"])
+        self.assertIn("hit one", step_calls[0]["output"])
+        # totals aggregate server-loop work AND relayed executor work
+        self.assertEqual(result["tool_call_count"], 1)
+        self.assertEqual(result["step_count"], 1)
 
     def test_run_uses_isolated_scope_agent_prompt_and_tools(self):
         graph = _FakeGraph(

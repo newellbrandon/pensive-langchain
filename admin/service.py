@@ -502,8 +502,22 @@ def _public_run(doc: dict) -> dict:
         if doc.get("tokens_in") is not None or doc.get("tokens_out") is not None
         else 0,
         "duration_ms": doc.get("duration_ms"),
-        "tool_call_count": doc.get("tool_call_count"),
-        "step_count": doc.get("step_count"),
+        # Legacy runs (recorded before the metrics existed) still carry their
+        # step transcripts — derive the call/step totals from them so the
+        # top-level view aggregates everything.
+        "tool_call_count": (
+            doc.get("tool_call_count")
+            if doc.get("tool_call_count") is not None
+            else (
+                sum(len(s.get("tool_calls") or []) for s in (doc.get("steps") or []))
+                or (len(doc.get("tool_calls") or []) or None)
+            )
+        ),
+        "step_count": (
+            doc.get("step_count")
+            if doc.get("step_count") is not None
+            else (len(doc.get("steps") or []) or None)
+        ),
         # Definition of the agent that ran (name/system prompt/tools) when it
         # was an ephemeral subagent — lets the console promote it to a
         # reusable specialist agent.
@@ -746,9 +760,9 @@ async def _invoke_agent_step(
     transcript: list,
     task: str,
     tools: list | None = None,
-) -> tuple[str, list[dict], list[dict], int, int]:
+) -> tuple[str, list[dict], list[dict], int, int, list[dict]]:
     """Run the graph once for the agent; returns
-    (answer, tool_calls, decisions, tokens_in, tokens_out)."""
+    (answer, tool_calls, decisions, tokens_in, tokens_out, server_tool_log)."""
     input_state: dict = {
         "messages": [HumanMessage(content=task)],
         "prompt_messages": list(transcript),
@@ -796,6 +810,7 @@ async def _invoke_agent_step(
         decisions,
         int(final_state.get("tokens_in") or 0),
         int(final_state.get("tokens_out") or 0),
+        final_state.get("server_tool_log") or [],
     )
 
 
@@ -859,7 +874,7 @@ async def run_agent(
         # and never pollute the conversation the model sees.
         retries = 0
         while True:
-            answer, tool_calls, decisions, step_tokens_in, step_tokens_out = (
+            answer, tool_calls, decisions, step_tokens_in, step_tokens_out, server_log = (
                 await _invoke_agent_step(
                     graph, agent, user_id, thread_id, transcript, task, tools=agent_tools
                 )
@@ -874,37 +889,56 @@ async def run_agent(
                 break
             retries += 1
             await asyncio.sleep(0.5)
-        if not tool_calls:
+        if not tool_calls and not server_log:
             break
 
-        transcript.append(
-            AIMessage(
-                content=answer,
-                tool_calls=[_to_langchain_tool_call(call) for call in tool_calls],
-            )
-        )
-        step_calls: list[dict] = []
-        for call in tool_calls:
-            executed = execute_tool_call(call, workspace)
+        # Server-loop executions (glean/spawn/project) happened inside the
+        # graph; fold them into the step transcript and totals so the history
+        # aggregates EVERY tool call, not just the relayed executor ones.
+        for call in server_log:
             executed_calls.append(
                 {
-                    "name": executed["name"],
-                    "arguments": json.dumps(call.get("arguments") or "")[:300],
-                    "output": executed["output"][:500],
+                    "name": call.get("name") or "",
+                    "arguments": str(call.get("arguments") or "")[:300],
+                    "output": str(call.get("output") or "")[:500],
                 }
             )
-            step_calls.append(
-                {
-                    "name": executed["name"],
-                    # Full payloads (bounded) so the UI can replay exactly what
-                    # the agent did at each step.
-                    "arguments": str(call.get("arguments") or "")[:12000],
-                    "output": executed["output"][:8000],
-                }
-            )
+        step_calls: list[dict] = [
+            {
+                "name": call.get("name") or "",
+                # Full payloads (bounded) so the UI can replay exactly what
+                # the agent did at each step.
+                "arguments": str(call.get("arguments") or "")[:12000],
+                "output": str(call.get("output") or "")[:8000],
+            }
+            for call in server_log
+        ]
+        if tool_calls:
             transcript.append(
-                ToolMessage(content=executed["output"], tool_call_id=call.get("id") or "")
+                AIMessage(
+                    content=answer,
+                    tool_calls=[_to_langchain_tool_call(call) for call in tool_calls],
+                )
             )
+            for call in tool_calls:
+                executed = execute_tool_call(call, workspace)
+                executed_calls.append(
+                    {
+                        "name": executed["name"],
+                        "arguments": json.dumps(call.get("arguments") or "")[:300],
+                        "output": executed["output"][:500],
+                    }
+                )
+                step_calls.append(
+                    {
+                        "name": executed["name"],
+                        "arguments": str(call.get("arguments") or "")[:12000],
+                        "output": executed["output"][:8000],
+                    }
+                )
+                transcript.append(
+                    ToolMessage(content=executed["output"], tool_call_id=call.get("id") or "")
+                )
         steps.append(
             {
                 "response": answer[:2000],
@@ -912,6 +946,8 @@ async def run_agent(
                 "tool_calls": step_calls,
             }
         )
+        if not tool_calls:
+            break
 
     return {
         "answer": answer,

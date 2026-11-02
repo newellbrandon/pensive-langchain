@@ -234,9 +234,22 @@ class SpawnSubagentTest(unittest.TestCase):
         tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
         self.assertTrue(any("internal hit" in m.content for m in tool_msgs))
 
+    def test_generate_logs_executed_server_calls(self):
+        # server-tool executions (spawn/glean/project) happen inside the
+        # generate loop; they must surface in the run history as tool calls
+        graph = _FakeSubGraph({"response": "digest ok", "tool_calls": [], "decisions": []})
+        steps = [
+            {"text": "", "tool_calls": [_spawn_call("s1", "research x")]},
+            {"text": "done", "tool_calls": []},
+        ]
+        result, client = self.run_node(_state(), steps, graph=graph)
+        log = result.get("server_tool_log") or []
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["name"], "spawn_subagent")
+        self.assertIn("[ok] subagent", log[0]["output"])
+        self.assertIn("arguments", log[0])
+
     def test_generate_loop_accumulates_usage_tokens(self):
-        # Each LLM round-trip reports usage; the node must sum it across the
-        # whole server-tool loop so runs can be ranked by token efficiency.
         graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})
         steps = [
             {"text": "", "tool_calls": [_spawn_call("s1", "t1")], "tokens_in": 110, "tokens_out": 22},
