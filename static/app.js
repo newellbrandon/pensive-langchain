@@ -701,7 +701,7 @@ async function loadGlean() {
     const s = await api("/api/admin/glean/status");
     const expiry = s.expires_at ? new Date(s.expires_at * 1000).toLocaleString() : "—";
     const toolLine = s.tool_count
-      ? `<p class="decisions">${s.tool_count} tool(s): <code>${esc(s.tools.join("</code>, <code>"))}</code></p>`
+      ? `<p class="decisions">${s.tool_count} tool(s): <code>${s.tools.map((t) => esc(String(t))).join("</code>, <code>")}</code></p>`
       : "";
     box.innerHTML = `
       <p class="decisions">
