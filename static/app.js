@@ -68,7 +68,7 @@ document.getElementById("tabs").addEventListener("click", (event) => {
   });
   if (button.dataset.tab === "memories") loadMemories();
   if (button.dataset.tab === "prompt") loadPrompt();
-  if (button.dataset.tab === "agents") loadAgents();
+  if (button.dataset.tab === "agents") showAgentsView(agentsViewState.view);
   if (button.dataset.tab === "glean") loadGlean();
 });
 
@@ -313,7 +313,13 @@ document.getElementById("save-prompt").addEventListener("click", async () => {
 
 /* ---------- agents ---------- */
 
-async function loadAgents() {
+function refreshAgentsTab() {
+  loadAgentsList();
+  workflowsFeed.render();
+  historyFeed.render();
+}
+
+async function loadAgentsList() {
   const list = document.getElementById("agent-list");
   try {
     const data = await api("/api/admin/agents");
@@ -327,66 +333,101 @@ async function loadAgents() {
     }
   } catch (error) {
     list.innerHTML = `<div class="empty">Could not load agents: ${esc(error.message)}</div>`;
-  } finally {
-    loadRecentRuns();
   }
 }
 
-/* ---------- recent executions (global feed: lab agents + subagents) ---------- */
+/* ---------- run feeds: Test Agent History (locked to test) + Agent Workflows ---------- */
 
-const runsFeed = { executor: null, sortBy: "created_at", order: "desc" };
+function bindRunsFeed(chipsPrefix, boxId, fixedExecutor) {
+  const feed = { executor: fixedExecutor, sortBy: "created_at", order: "desc" };
+  const executorChips = document.getElementById(`${chipsPrefix}executor-chips`);
+  const sortChips = document.getElementById(`${chipsPrefix}sort-chips`);
 
-function syncRunsChips() {
-  document.querySelectorAll("#runs-executor-chips .chip").forEach((c) => {
-    c.classList.toggle("active", (c.dataset.executor || null) === runsFeed.executor);
-  });
-  document.querySelectorAll("#runs-sort-chips .chip").forEach((c) => {
-    c.classList.toggle("active", c.dataset.sort === `${runsFeed.sortBy}:${runsFeed.order}`);
-  });
-}
-
-document.getElementById("runs-executor-chips").addEventListener("click", (event) => {
-  const chip = event.target.closest(".chip");
-  if (!chip) return;
-  runsFeed.executor = chip.dataset.executor || null;
-  syncRunsChips();
-  loadRecentRuns();
-});
-
-document.getElementById("runs-sort-chips").addEventListener("click", (event) => {
-  const chip = event.target.closest(".chip");
-  if (!chip) return;
-  const [sortBy, order] = chip.dataset.sort.split(":");
-  runsFeed.sortBy = sortBy;
-  runsFeed.order = order;
-  syncRunsChips();
-  loadRecentRuns();
-});
-
-async function loadRecentRuns() {
-  const box = document.getElementById("recent-runs");
-  if (!box) return;
-  try {
-    const params = new URLSearchParams({ limit: "25", sort_by: runsFeed.sortBy, order: runsFeed.order });
-    if (runsFeed.executor) params.set("executor", runsFeed.executor);
-    const data = await api(`/api/admin/runs?${params.toString()}`);
-    const runs = data.runs || [];
-    box.innerHTML = "";
-    if (!runs.length) {
-      box.innerHTML = `<div class="empty">No executions yet — spawn a subagent from a chat, or run a lab agent below.</div>`;
-      return;
+  function syncChips() {
+    if (executorChips) {
+      executorChips.querySelectorAll(".chip").forEach((c) => {
+        c.classList.toggle("active", (c.dataset.executor || null) === feed.executor);
+      });
     }
-    const header = document.createElement("div");
-    header.className = "runs-header";
-    header.innerHTML = `<span>Source</span><span>Agent</span><span>When</span><span>Tokens</span><span>Tool&nbsp;calls</span><span>Runtime</span>`;
-    box.appendChild(header);
-    for (const run of runs) {
-      box.appendChild(recentRunItem(run));
+    if (sortChips) {
+      sortChips.querySelectorAll(".chip").forEach((c) => {
+        c.classList.toggle("active", c.dataset.sort === `${feed.sortBy}:${feed.order}`);
+      });
     }
-  } catch (error) {
-    box.innerHTML = `<div class="empty">Could not load executions: ${esc(error.message)}</div>`;
   }
+
+  if (executorChips) {
+    executorChips.addEventListener("click", (event) => {
+      const chip = event.target.closest(".chip");
+      if (!chip) return;
+      feed.executor = chip.dataset.executor || null;
+      syncChips();
+      render();
+    });
+  }
+  if (sortChips) {
+    sortChips.addEventListener("click", (event) => {
+      const chip = event.target.closest(".chip");
+      if (!chip) return;
+      const [sortBy, order] = chip.dataset.sort.split(":");
+      feed.sortBy = sortBy;
+      feed.order = order;
+      syncChips();
+      render();
+    });
+  }
+
+  async function render() {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    try {
+      const params = new URLSearchParams({ limit: "25", sort_by: feed.sortBy, order: feed.order });
+      if (feed.executor) params.set("executor", feed.executor);
+      const data = await api(`/api/admin/runs?${params.toString()}`);
+      const runs = data.runs || [];
+      box.innerHTML = "";
+      if (!runs.length) {
+        box.innerHTML = `<div class="empty">No runs yet — ${fixedExecutor === "test" ? "run a lab agent from Test Agents." : "spawn a subagent from a chat, or run a lab agent from Test Agents."}</div>`;
+        return;
+      }
+      const header = document.createElement("div");
+      header.className = "runs-header";
+      header.innerHTML = `<span>Source</span><span>Agent</span><span>When</span><span>Tokens</span><span>Tool&nbsp;calls</span><span>Runtime</span>`;
+      box.appendChild(header);
+      for (const run of runs) {
+        box.appendChild(recentRunItem(run));
+      }
+    } catch (error) {
+      box.innerHTML = `<div class="empty">Could not load runs: ${esc(error.message)}</div>`;
+    }
+  }
+
+  return { render, sync: syncChips };
 }
+
+const workflowsFeed = bindRunsFeed("runs-", "recent-runs", null);
+const historyFeed = bindRunsFeed("hist-", "test-history-runs", "test");
+
+const agentsViewState = { view: "agents" };
+
+async function showAgentsView(view) {
+  agentsViewState.view = view;
+  document.querySelectorAll("#agents-views .seg-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.aview === view);
+  });
+  document.querySelectorAll("#tab-agents .aview").forEach((p) => {
+    p.classList.toggle("active", p.id === `aview-${view}`);
+  });
+  if (view === "agents") loadAgentsList();
+  else if (view === "history") historyFeed.render();
+  else workflowsFeed.render();
+}
+
+document.getElementById("agents-views").addEventListener("click", (event) => {
+  const button = event.target.closest(".seg-btn");
+  if (!button) return;
+  showAgentsView(button.dataset.aview);
+});
 
 function fmtTokens(n) {
   const v = Number(n) || 0;
@@ -474,7 +515,7 @@ function recentRunItem(run) {
         });
         toast(`Agent “${res.agent.name}” created — find it under Test agents`);
         promoteButton.textContent = "Saved ✓";
-        loadAgents();
+        refreshAgentsTab();
       } catch (error) {
         promoteButton.disabled = false;
         promoteButton.textContent = "Reuse as specialist agent";
@@ -557,6 +598,9 @@ function agentCard(agent) {
         <p class="decisions">${decisionLines || "no decisions recorded"}</p>
       `;
       if (runsDetails.open) renderAgentRuns(agent, runsBox);
+      // a completed lab run lands in both global feeds
+      workflowsFeed.render();
+      historyFeed.render();
     } catch (error) {
       resultBox.innerHTML = `<p class="decisions" style="color:var(--danger)">${esc(error.message)}</p>`;
     } finally {
@@ -572,7 +616,7 @@ function agentCard(agent) {
       await api(`/api/admin/agents/${encodeURIComponent(agent.id)}`, { method: "DELETE" });
       if (editingAgentId === agent.id) cancelEdit();
       toast("Agent deleted");
-      loadAgents();
+      refreshAgentsTab();
     } catch (error) {
       toast(error.message, true);
     }
@@ -779,7 +823,7 @@ document.getElementById("create-agent").addEventListener("click", async () => {
       toast(`Agent “${name}” created`);
     }
     cancelEdit();
-    loadAgents();
+    refreshAgentsTab();
   } catch (error) {
     toast(error.message, true);
   }

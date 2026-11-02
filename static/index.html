@@ -70,43 +70,47 @@
     <!-- ============ AGENTS ============ -->
     <section id="tab-agents" class="tab-panel">
       <div class="panel-head">
-        <h1>Test agents</h1>
-        <p class="sub">Deploy an isolated agent with its own system prompt and tools. Runs are scoped to <code>agent:&lt;id&gt;</code> so they never pollute the main Pensive context.</p>
+        <h1>Agents</h1>
+        <p class="sub">Deploy isolated test agents, review their run history, and browse every workflow — Pensive-spawned subagents included.</p>
       </div>
 
-      <div class="card">
-        <h2 class="card-title"><span id="agent-form-title">Create agent</span></h2>
-        <div class="form-grid">
-          <label class="field">
-            <span>Name (leave blank to auto-generate)</span>
-            <input id="agent-name" type="text" placeholder="e.g. jade-scribe-4f2a" />
-          </label>
-          <label class="field span-2">
-            <span>System prompt</span>
-            <textarea id="agent-prompt" rows="3" placeholder="You are a release note writer…"></textarea>
-          </label>
-          <label class="field span-2">
-            <span>Tools (JSON array of OpenAI function definitions)</span>
-            <textarea id="agent-tools" rows="4" spellcheck="false" placeholder='[{"type":"function","function":{"name":"write_file",…}}]'></textarea>
-            <span class="hint">Built-in tools available in the agent workspace: <code>write_file</code>, <code>append_file</code>, <code>read_file</code>, <code>run_command</code>, <code>web_search</code> (DuckDuckGo), <code>web_extract</code> (page content). Leave tools empty to enable all of them.</span>
-          </label>
+      <nav class="seg" id="agents-views">
+        <button class="seg-btn active" data-aview="agents">Test Agents</button>
+        <button class="seg-btn" data-aview="history">Test Agent History</button>
+        <button class="seg-btn" data-aview="workflows">Agent Workflows</button>
+      </nav>
+
+      <div id="aview-agents" class="aview active">
+        <div class="card">
+          <h2 class="card-title"><span id="agent-form-title">Create agent</span></h2>
+          <div class="form-grid">
+            <label class="field">
+              <span>Name (leave blank to auto-generate)</span>
+              <input id="agent-name" type="text" placeholder="e.g. jade-scribe-4f2a" />
+            </label>
+            <label class="field span-2">
+              <span>System prompt</span>
+              <textarea id="agent-prompt" rows="3" placeholder="You are a release note writer…"></textarea>
+            </label>
+            <label class="field span-2">
+              <span>Tools (JSON array of OpenAI function definitions)</span>
+              <textarea id="agent-tools" rows="4" spellcheck="false" placeholder='[{"type":"function","function":{"name":"write_file",…}}]'></textarea>
+              <span class="hint">Built-in tools available in the agent workspace: <code>write_file</code>, <code>append_file</code>, <code>read_file</code>, <code>run_command</code>, <code>web_search</code> (DuckDuckGo), <code>web_extract</code> (page content). Leave tools empty to enable all of them.</span>
+            </label>
+          </div>
+          <div class="card-actions">
+            <button id="create-agent" class="btn primary">Create agent</button>
+            <button id="cancel-edit" class="btn" hidden>Cancel edit</button>
+          </div>
         </div>
-        <div class="card-actions">
-          <button id="create-agent" class="btn primary">Create agent</button>
-          <button id="cancel-edit" class="btn" hidden>Cancel edit</button>
-        </div>
+        <div id="agent-list" class="agent-list"></div>
       </div>
 
-      <div class="card">
-        <div class="card-head-row">
-          <h2 class="card-title">Agent workflows</h2>
-          <div class="chip-groups">
-            <div class="chip-group" id="runs-executor-chips">
-              <button class="chip active" data-executor="">All</button>
-              <button class="chip" data-executor="pensive">Pensive</button>
-              <button class="chip" data-executor="test">Test</button>
-            </div>
-            <div class="chip-group" id="runs-sort-chips">
+      <div id="aview-history" class="aview">
+        <div class="card">
+          <div class="card-head-row">
+            <h2 class="card-title">Test agent history</h2>
+            <div class="chip-group" id="hist-sort-chips">
               <button class="chip active" data-sort="created_at:desc">Newest</button>
               <button class="chip" data-sort="created_at:asc">Oldest</button>
               <button class="chip" data-sort="tokens_total:desc">Most tokens</button>
@@ -117,12 +121,37 @@
               <button class="chip" data-sort="step_count:desc">Most steps</button>
             </div>
           </div>
+          <p class="hint">Every run executed by <em>test</em> agents from this console — newest first by default. Click a row to see the full task, answer, step transcripts, and workspace files.</p>
+          <div id="test-history-runs" class="runs-list"></div>
         </div>
-        <p class="hint">Every agent workflow, newest first by default — <em>pensive</em> runs are subagents spawned from a chat, <em>test</em> runs are lab agents started here. Sort by tokens, duration, or activity to spot low-token, high-performing agents worth promoting into reusable tools. Subagent rows offer <em>Reuse as specialist agent</em>.</p>
-        <div id="recent-runs" class="runs-list"></div>
       </div>
 
-      <div id="agent-list" class="agent-list"></div>
+      <div id="aview-workflows" class="aview">
+        <div class="card">
+          <div class="card-head-row">
+            <h2 class="card-title">Agent workflows</h2>
+            <div class="chip-groups">
+              <div class="chip-group" id="runs-executor-chips">
+                <button class="chip active" data-executor="">All</button>
+                <button class="chip" data-executor="pensive">Pensive</button>
+                <button class="chip" data-executor="test">Test</button>
+              </div>
+              <div class="chip-group" id="runs-sort-chips">
+                <button class="chip active" data-sort="created_at:desc">Newest</button>
+                <button class="chip" data-sort="created_at:asc">Oldest</button>
+                <button class="chip" data-sort="tokens_total:desc">Most tokens</button>
+                <button class="chip" data-sort="tokens_total:asc">Fewest tokens</button>
+                <button class="chip" data-sort="duration_ms:desc">Slowest</button>
+                <button class="chip" data-sort="duration_ms:asc">Fastest</button>
+                <button class="chip" data-sort="tool_call_count:desc">Most tools</button>
+                <button class="chip" data-sort="step_count:desc">Most steps</button>
+              </div>
+            </div>
+          </div>
+          <p class="hint">Every workflow, newest first by default — <em>pensive</em> runs are subagents spawned from a chat, <em>test</em> runs are lab agents started here. Sort by tokens, duration, or activity to spot low-token, high-performing agents worth promoting into reusable tools. Subagent rows offer <em>Reuse as specialist agent</em>.</p>
+          <div id="recent-runs" class="runs-list"></div>
+        </div>
+      </div>
     </section>
 
     <!-- ============ GLEAN ============ -->
