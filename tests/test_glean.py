@@ -264,3 +264,43 @@ class GleanClientTest(unittest.TestCase):
         client = self.make_client()
         result = _run(client.call_tool("glean_nope", {}))
         self.assertIn("[error]", result["output"])
+
+
+# --- admin routes: status must warm the tool snapshot -------------------------
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from api.glean_routes import router as glean_router
+
+_glean_app = FastAPI()
+_glean_app.include_router(glean_router)
+_glean_client = TestClient(_glean_app)
+
+
+def test_glean_status_warms_tool_snapshot_when_stale(monkeypatch):
+    # The snapshot lives in memory in the singleton GleanClient; a restart
+    # resets it, so opening the Glean tab must trigger discovery again.
+    fake = mock.Mock()
+    fake.refresh_tools_if_stale = mock.AsyncMock()
+    fake.status = mock.AsyncMock(
+        return_value={
+            "connected": True,
+            "has_token": True,
+            "expires_at": None,
+            "tool_count": 0,
+            "tools": [],
+            "mcp_url": "https://mcp.example/mcp/default",
+        }
+    )
+    fake.oauth.scope = "SEARCH DOCUMENTS ENTITIES MCP"
+    monkeypatch.setattr("api.glean_routes.get_glean_client", lambda: fake)
+
+    response = _glean_client.get("/api/admin/glean/status")
+
+    assert response.status_code == 200
+    assert fake.refresh_tools_if_stale.await_count == 1
+    body = response.json()
+    assert body["connected"] is True
+    assert body["tool_count"] == 0
+    assert body["scope"] == "SEARCH DOCUMENTS ENTITIES MCP"

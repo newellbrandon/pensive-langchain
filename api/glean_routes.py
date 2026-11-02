@@ -41,6 +41,12 @@ def _expire_pending() -> None:
 @router.get("/status")
 async def glean_status() -> dict:
     client = get_glean_client()
+    # The tool snapshot lives in memory in the singleton client, so a restart
+    # (or a stale snapshot) starts with tool_count 0. Warm it here — a no-op
+    # within the TTL and when credentials are missing — so the console's Glean
+    # tab self-heals instead of showing 13 tools only after some other call
+    # happens to trigger discovery.
+    await client.refresh_tools_if_stale()
     status = await client.status()
     _expire_pending()
     return {
