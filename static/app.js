@@ -290,7 +290,103 @@ async function loadAgents() {
     }
   } catch (error) {
     list.innerHTML = `<div class="empty">Could not load agents: ${esc(error.message)}</div>`;
+  } finally {
+    loadRecentRuns();
   }
+}
+
+/* ---------- recent executions (global feed: lab agents + subagents) ---------- */
+
+async function loadRecentRuns() {
+  const box = document.getElementById("recent-runs");
+  if (!box) return;
+  try {
+    const data = await api("/api/admin/runs?limit=25");
+    const runs = data.runs || [];
+    box.innerHTML = "";
+    if (!runs.length) {
+      box.innerHTML = `<div class="empty">No executions yet — spawn a subagent from a chat, or run a lab agent below.</div>`;
+      return;
+    }
+    for (const run of runs) {
+      box.appendChild(recentRunItem(run));
+    }
+  } catch (error) {
+    box.innerHTML = `<div class="empty">Could not load executions: ${esc(error.message)}</div>`;
+  }
+}
+
+function recentRunItem(run) {
+  const item = document.createElement("details");
+  item.className = "run-item";
+  const isSubagent = String(run.agent_id || "").startsWith("sub-");
+  const who = isSubagent
+    ? (run.agent && run.agent.name ? `subagent ${esc(run.agent.name)}` : `subagent ${esc(run.agent_id)}`)
+    : `agent ${esc(run.agent_id)}`;
+  const taskPreview = run.task.length > 70 ? run.task.slice(0, 70) + "…" : run.task;
+  const actions = [];
+  if (isSubagent && run.agent && run.agent.name && run.agent.system_prompt && Array.isArray(run.agent.tools)) {
+    actions.push(`<button class="btn small run-again" data-action="promote" data-run-id="${esc(run.run_id)}">Reuse as specialist agent</button>`);
+  }
+  if (run.workspace) {
+    actions.push(`<button class="btn small run-again" data-action="files">Show workspace files</button>`);
+  }
+  item.innerHTML = `
+    <summary>
+      <span class="run-task">${esc(taskPreview)}</span>
+      <span class="run-when">${who} · ${fmtWhen(run.created_at)} · ${esc(run.status)}</span>
+      ${actions.join("")}
+    </summary>
+    <div class="run-detail">
+      ${run.answer ? `<p class="answer">${esc(run.answer)}</p>` : `<p class="decisions">(no answer text)</p>`}
+      ${renderRunSteps(run)}
+      <div class="workspace-block">
+        <div class="files-list"></div>
+      </div>
+    </div>
+  `;
+
+  const filesButton = item.querySelector('[data-action="files"]');
+  const filesList = item.querySelector(".files-list");
+  if (filesButton) {
+    filesButton.addEventListener("click", async () => {
+      filesButton.disabled = true;
+      try {
+        const data = await api(`/api/admin/agents/${encodeURIComponent(run.agent_id)}/workspace`);
+        filesButton.hidden = true;
+        renderWorkspaceFiles({ id: run.agent_id }, data.files, filesList);
+      } catch (error) {
+        filesList.innerHTML = `<span class="decisions">${esc(error.message)}</span>`;
+      } finally {
+        filesButton.disabled = false;
+      }
+    });
+  }
+
+  const promoteButton = item.querySelector('[data-action="promote"]');
+  if (promoteButton) {
+    promoteButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      promoteButton.disabled = true;
+      promoteButton.textContent = "Saving…";
+      try {
+        const res = await api("/api/admin/agents", {
+          method: "POST",
+          body: JSON.stringify(run.agent),
+        });
+        toast(`Agent “${res.agent.name}” created — find it under Test agents`);
+        promoteButton.textContent = "Saved ✓";
+        loadAgents();
+      } catch (error) {
+        promoteButton.disabled = false;
+        promoteButton.textContent = "Reuse as specialist agent";
+        toast(error.message, true);
+      }
+    });
+  }
+
+  return item;
 }
 
 function toolCount(tools) {

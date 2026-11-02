@@ -102,7 +102,9 @@ class SpawnSubagentTest(unittest.TestCase):
         # record_run would hit the real Mongo connection on the host — stub it.
         self.record_patcher = mock.patch(
             "agent.nodes.admin.record_run",
-            side_effect=lambda agent_id, task, result: self.recorded_runs.append((agent_id, task)),
+            side_effect=lambda agent_id, task, result, agent_def=None: self.recorded_runs.append(
+                (agent_id, task, agent_def)
+            ),
         )
         self.record_patcher.start()
         self.addCleanup(self.record_patcher.stop)
@@ -260,6 +262,13 @@ class SpawnSubagentTest(unittest.TestCase):
         self.assertEqual(len(self.recorded_runs), 1)
         self.assertTrue(self.recorded_runs[0][0].startswith("sub-"))
         self.assertEqual(self.recorded_runs[0][1], "research vector search")
+        # ... and the subagent definition is recorded with the run, so a good
+        # subagent can later be promoted to a reusable specialist agent
+        agent_def = self.recorded_runs[0][2]
+        self.assertEqual(set(agent_def.keys()), {"name", "system_prompt", "tools"})
+        self.assertTrue(agent_def["name"])
+        self.assertTrue(agent_def["system_prompt"])
+        self.assertEqual(agent_def["tools"], admin.DEFAULT_AGENT_TOOLS)
 
     def test_spawn_budget_caps_at_two(self):
         graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})

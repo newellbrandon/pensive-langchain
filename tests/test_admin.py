@@ -278,6 +278,52 @@ class AgentHistoryTest(unittest.TestCase):
         self.assertEqual(runs[0]["answer"], "v2")
         self.assertEqual(runs[0]["tool_calls"], [])
 
+    def test_list_recent_runs_covers_lab_and_spawned_agents(self):
+        admin.record_run(
+            "ag_1", "lab run", {"answer": "a"}, collection=self.coll,
+        )
+        admin.record_run(
+            "sub-abc123", "subagent run", {"answer": "b"}, collection=self.coll,
+        )
+        admin.record_run(
+            "ag_1", "newest lab run", {"answer": "c"}, collection=self.coll,
+        )
+        runs = admin.list_recent_runs(collection=self.coll)
+        self.assertEqual(
+            [r["task"] for r in runs],
+            ["newest lab run", "subagent run", "lab run"],
+        )
+        self.assertEqual(runs[1]["agent_id"], "sub-abc123")
+        self.assertEqual(runs[1]["answer"], "b")
+        self.assertTrue(all(r["status"] == "completed" for r in runs))
+        # limit clamps the feed
+        two = admin.list_recent_runs(limit=2, collection=self.coll)
+        self.assertEqual([r["task"] for r in two], ["newest lab run", "subagent run"])
+
+    def test_list_recent_runs_round_trips_agent_definition(self):
+        run = admin.record_run(
+            "sub-abc123",
+            "search glean",
+            {"answer": "digest", "decisions": [], "tool_calls": [], "workspace": "/w"},
+            agent_def={
+                "name": "coral-scribe-3621",
+                "system_prompt": "You are a focused subagent that searches Glean.",
+                "tools": [
+                    {"type": "function", "function": {"name": "glean_search"}},
+                    {"type": "function", "function": {"name": "web_search"}},
+                ],
+            },
+            collection=self.coll,
+        )
+        # the definition survives the public shape, so the console can promote
+        self.assertEqual(run["agent"]["name"], "coral-scribe-3621")
+        self.assertTrue(run["agent"]["system_prompt"].startswith("You are"))
+        self.assertEqual(run["agent"]["tools"][0]["function"]["name"], "glean_search")
+        # and it rides along in the global feed
+        recent = admin.list_recent_runs(collection=self.coll)
+        self.assertEqual(recent[0]["agent"]["name"], "coral-scribe-3621")
+        self.assertEqual(len(recent[0]["agent"]["tools"]), 2)
+
     def test_record_run_keeps_step_history(self):
         steps = [
             {
@@ -737,6 +783,33 @@ _api_app.include_router(admin_router)
 _api_app.state.graph = _FakeGraph(final_state={"response": "isolated answer"})
 
 _client = TestClient(_api_app)
+
+
+def test_list_recent_runs_endpoint_returns_global_feed(monkeypatch):
+    monkeypatch.setattr(
+        admin,
+        "list_recent_runs",
+        lambda limit=25: [
+            {
+                "run_id": "r1",
+                "agent_id": "sub-4dffbf849232",
+                "task": "Search EXCLUSIVELY via Glean…",
+                "answer": "No substantive internal docs…",
+                "decisions": [],
+                "tool_calls": [],
+                "steps": [],
+                "workspace": "",
+                "status": "completed",
+                "created_at": "2026-11-02T01:02:42+00:00",
+            }
+        ],
+    )
+    response = _client.get("/api/admin/runs")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runs"][0]["agent_id"] == "sub-4dffbf849232"
+    assert body["runs"][0]["status"] == "completed"
+    assert body["runs"][0]["task"].startswith("Search EXCLUSIVELY")
 
 
 def test_memory_types_describe_all_four():

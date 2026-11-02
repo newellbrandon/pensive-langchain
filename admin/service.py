@@ -325,6 +325,10 @@ def _public_run(doc: dict) -> dict:
         "workspace": doc.get("workspace") or "",
         "status": doc.get("status") or "",
         "created_at": doc.get("created_at"),
+        # Definition of the agent that ran (name/system prompt/tools) when it
+        # was an ephemeral subagent — lets the console promote it to a
+        # reusable specialist agent.
+        "agent": doc.get("agent"),
     }
 
 
@@ -333,12 +337,15 @@ def record_run(
     task: str,
     result: dict,
     *,
+    agent_def: Optional[dict] = None,
     collection: Collection | None = None,
 ) -> dict:
     """Persist a completed agent run so past work can be reviewed and re-run.
 
     The result is stored with bounded sizes (executed tool-call outputs are
-    already truncated by the executor) so history stays light.
+    already truncated by the executor) so history stays light. ``agent_def``
+    captures the ephemeral agent's definition (name / system prompt / tools)
+    so a useful subagent can later be promoted to a reusable lab agent.
     """
     doc = {
         "_id": uuid.uuid4().hex[:12],
@@ -352,6 +359,13 @@ def record_run(
         "status": "completed",
         "created_at": _now(),
     }
+    if agent_def and isinstance(agent_def, dict):
+        tools = [t for t in agent_def.get("tools") or [] if isinstance(t, dict)][:12]
+        doc["agent"] = {
+            "name": str(agent_def.get("name") or "")[:200],
+            "system_prompt": str(agent_def.get("system_prompt") or "")[:4000],
+            "tools": tools,
+        }
     _runs_collection(collection).insert_one(doc)
     return _public_run(doc)
 
@@ -364,6 +378,18 @@ def list_runs(
 ) -> list[dict]:
     """Agent runs, newest first."""
     docs = _runs_collection(collection).find({"agent_id": agent_id})
+    docs = sorted(docs, key=lambda d: d.get("created_at") or "", reverse=True)
+    return [_public_run(d) for d in docs[:limit]]
+
+
+def list_recent_runs(
+    limit: int = 25,
+    *,
+    collection: Collection | None = None,
+) -> list[dict]:
+    """Most recent runs across ALL agents (lab agents and ephemeral spawned
+    ``sub-*`` subagents), newest first — the console's global execution feed."""
+    docs = _runs_collection(collection).find({})
     docs = sorted(docs, key=lambda d: d.get("created_at") or "", reverse=True)
     return [_public_run(d) for d in docs[:limit]]
 
