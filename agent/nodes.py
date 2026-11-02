@@ -141,6 +141,7 @@ async def generate_response(state: AgentState) -> dict:
     tool_calls: list[dict] = []
     tokens_in = 0
     tokens_out = 0
+    server_log: list[dict] = []
     for _ in range(_SERVER_ITERATION_LIMIT):
         try:
             result = await client.acomplete(
@@ -187,6 +188,13 @@ async def generate_response(state: AgentState) -> dict:
                 exhausted.append(call)
         for call in handled:
             digest = await _execute_server_call(call, state)
+            server_log.append(
+                {
+                    "name": _call_name(call),
+                    "arguments": str(call.get("arguments") or "")[:12000],
+                    "output": str(digest or "")[:8000],
+                }
+            )
             prompt_messages.append(
                 AIMessage(content="", tool_calls=[_to_langchain_tool_call(call)])
             )
@@ -223,7 +231,14 @@ async def generate_response(state: AgentState) -> dict:
         "decision": "tool_calls" if tool_calls else "respond",
         "reason": reason,
     }
-    return _generate_result(content, relay_calls, [decision], tokens_in=tokens_in, tokens_out=tokens_out)
+    return _generate_result(
+        content,
+        relay_calls,
+        [decision],
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        server_tool_log=server_log,
+    )
 
 
 def _call_name(call: dict) -> str:
@@ -433,6 +448,7 @@ def _generate_result(
     *,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    server_tool_log: list[dict] | None = None,
 ) -> dict:
     """Build the generate node's return value."""
     assistant_message = AIMessage(content=content)
@@ -455,6 +471,7 @@ def _generate_result(
         "decisions": decisions,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
+        "server_tool_log": server_tool_log or [],
     }
 
 
