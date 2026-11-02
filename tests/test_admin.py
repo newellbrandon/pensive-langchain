@@ -6,7 +6,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -258,6 +258,50 @@ class AgentHistoryTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def _run_doc(self, _id: str, created_at: str) -> dict:
+        return {
+            "_id": _id,
+            "agent_id": "sub-x",
+            "task": "t",
+            "answer": "",
+            "decisions": [],
+            "tool_calls": [],
+            "steps": [],
+            "workspace": "",
+            "status": "completed",
+            "created_at": created_at,
+        }
+
+    def test_record_run_applies_retention_policy(self):
+        with mock.patch("admin.service.prune_runs", wraps=admin.prune_runs) as spy:
+            admin.record_run("ag_1", "t", {"answer": "a"}, collection=self.coll)
+        self.assertTrue(spy.called)
+
+    def test_prune_runs_caps_history_at_1500_docs(self):
+        now = datetime.now(timezone.utc)
+        self.coll.docs.extend(
+            self._run_doc(f"r{i:04d}", (now - timedelta(seconds=i)).isoformat())
+            for i in range(1502)
+        )
+        removed = admin.prune_runs(collection=self.coll)
+        self.assertEqual(removed["removed"], 2)
+        remaining = {d["_id"] for d in self.coll.docs}
+        self.assertIn("r0000", remaining)  # newest kept
+        self.assertIn("r0001", remaining)
+        self.assertNotIn("r1500", remaining)  # oldest two dropped
+        self.assertNotIn("r1501", remaining)
+        self.assertEqual(len(self.coll.docs), 1500)
+
+    def test_prune_runs_removes_workflows_older_than_30_days(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+        fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        self.coll.docs.extend([self._run_doc("old1", old), self._run_doc("fresh1", fresh)])
+        removed = admin.prune_runs(collection=self.coll)
+        self.assertEqual(removed["removed"], 1)
+        remaining = {d["_id"] for d in self.coll.docs}
+        self.assertIn("fresh1", remaining)
+        self.assertNotIn("old1", remaining)
 
     def test_record_run_and_list_runs_newest_first(self):
         first = admin.record_run(
