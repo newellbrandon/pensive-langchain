@@ -80,7 +80,7 @@ async def merge_duplicate_memories(body: MemoryMergeRequest) -> dict:
     """Group semantically similar memories into one complete curated memory
     each (newest record wins as anchor, contents merged, copies deleted)."""
     try:
-        return admin.merge_duplicate_memories(body.user_id, body.mem_type)
+        return await admin.merge_duplicate_memories(body.user_id, body.mem_type)
     except ValueError as exc:
         raise _bad_request(exc)
 
