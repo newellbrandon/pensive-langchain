@@ -13,7 +13,7 @@ import logging
 import os
 import random
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Collection, Optional
 
@@ -53,6 +53,12 @@ def memory_types() -> list[dict]:
         {"type": mem_type, **MEMORY_TYPE_META[mem_type]}
         for mem_type in MEMORY_TYPES
     ]
+
+
+# Workflow-history retention: at most this many run documents, and none older
+# than this many days — whichever limit is hit first.
+RUN_HISTORY_MAX_DOCS = 1500
+RUN_HISTORY_MAX_AGE_DAYS = 30
 
 
 def _now() -> str:
@@ -377,7 +383,34 @@ def record_run(
             "tools": tools,
         }
     _runs_collection(collection).insert_one(doc)
+    try:
+        prune_runs(collection=collection)
+    except Exception:  # noqa: BLE001 — retention is best-effort
+        logger.exception("could not prune run history")
     return _public_run(doc)
+
+
+def prune_runs(*, collection: Collection | None = None) -> dict:
+    """Enforce workflow-history retention: at most ``RUN_HISTORY_MAX_DOCS``
+    documents and none older than ``RUN_HISTORY_MAX_AGE_DAYS`` days —
+    whichever limit is hit first. Runs are stored with ISO-8601 UTC
+    ``created_at`` strings, which sort/compare lexicographically, so the
+    app-side scan is safe and exact."""
+    coll = _runs_collection(collection)
+    docs = list(coll.find({}))
+    if not docs:
+        return {"removed": 0}
+    docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RUN_HISTORY_MAX_AGE_DAYS)).isoformat()
+    doomed = [d["_id"] for d in docs[RUN_HISTORY_MAX_DOCS:]]
+    doomed += [
+        d["_id"]
+        for d in docs[:RUN_HISTORY_MAX_DOCS]
+        if d.get("created_at") and d["created_at"] < cutoff
+    ]
+    for run_id in doomed:
+        coll.delete_one({"_id": run_id})
+    return {"removed": len(doomed)}
 
 
 def list_runs(
