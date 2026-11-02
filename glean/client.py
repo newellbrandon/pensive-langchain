@@ -25,6 +25,17 @@ TOOL_PREFIX = "glean_"
 _CALL_OUTPUT_LIMIT = 8000
 _SNAPSHOT_TTL_SECONDS = 60.0
 
+# glean_search parameters the MODEL may use. The full Glean schema also
+# carries poisonable metadata filters (type, channel, from, cursor,
+# dynamic_search_result_filters, container_filter, updated, _user_goal) that
+# models demonstrably misuse — e.g. "type": "pull" silently restricts every
+# search to GitHub PRs, returning noise where the Web UI (query only) finds
+# relevant results. The hidden params stay callable via the console smoke
+# box; the model gets Web-UI-parity behavior.
+_SEARCH_PARAM_WHITELIST = frozenset(
+    {"query", "num_results", "after", "before", "app", "owner", "sort_by_recency"}
+)
+
 
 def _block_text(block: Any) -> str:
     if isinstance(block, dict):
@@ -183,6 +194,20 @@ class GleanClient:
             params.setdefault("type", "object")
             params.setdefault("properties", {})
             prefixed = f"{TOOL_PREFIX}{name}"
+            if prefixed == f"{TOOL_PREFIX}search":
+                props = params.get("properties") or {}
+                params = {
+                    "type": "object",
+                    "properties": {
+                        k: v for k, v in props.items() if k in _SEARCH_PARAM_WHITELIST
+                    },
+                    "required": [
+                        k
+                        for k in (params.get("required") or [])
+                        if k in _SEARCH_PARAM_WHITELIST
+                    ]
+                    or ["query"],
+                }
             tool_map[prefixed] = name
             snapshot.append(
                 {
@@ -250,8 +275,19 @@ class GleanClient:
                 ),
             }
         try:
+            clean_args = {
+                k: v
+                for k, v in (arguments or {}).items()
+                if v not in (None, "") and k != "_user_goal"
+            }
+            if original == "search":
+                # belt & braces: hidden poisonable filters never reach the
+                # server even if a stale conversation replays them
+                clean_args = {
+                    k: v for k, v in clean_args.items() if k in _SEARCH_PARAM_WHITELIST
+                }
             result = await self._run_with_session(
-                lambda session: session.call_tool(original, arguments or {})
+                lambda session: session.call_tool(original, clean_args)
             )
         except (Exception, BaseExceptionGroup) as exc:  # noqa: BLE001
             return {
