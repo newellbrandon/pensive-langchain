@@ -376,6 +376,10 @@ async function loadRecentRuns() {
       box.innerHTML = `<div class="empty">No executions yet — spawn a subagent from a chat, or run a lab agent below.</div>`;
       return;
     }
+    const header = document.createElement("div");
+    header.className = "runs-header";
+    header.innerHTML = `<span>Source</span><span>Agent</span><span>When</span><span>Tokens</span><span>Tool&nbsp;calls</span><span>Runtime</span>`;
+    box.appendChild(header);
     for (const run of runs) {
       box.appendChild(recentRunItem(run));
     }
@@ -402,36 +406,37 @@ function recentRunItem(run) {
   item.className = "run-item";
   const isSubagent = String(run.agent_id || "").startsWith("sub-");
   const executor = run.executor || (isSubagent ? "pensive" : "test");
-  const who = isSubagent
-    ? (run.agent && run.agent.name ? `subagent ${esc(run.agent.name)}` : `subagent ${esc(run.agent_id)}`)
-    : `agent ${esc(run.agent_id)}`;
-  const taskPreview = run.task.length > 70 ? run.task.slice(0, 70) + "…" : run.task;
+  const agentName = isSubagent
+    ? (run.agent && run.agent.name ? esc(run.agent.name) : esc(run.agent_id))
+    : esc(run.agent_id);
+  const agentSub = isSubagent ? esc(run.agent_id) : "test agent";
   const hasTokens = run.tokens_in != null || run.tokens_out != null;
-  const metricChips = [];
-  if (hasTokens) metricChips.push(`${fmtTokens(run.tokens_total)} tok`);
-  if (run.tool_call_count != null) metricChips.push(`${run.tool_call_count} tool call(s)`);
-  if (run.duration_ms != null) metricChips.push(fmtDuration(run.duration_ms));
-  const metrics = metricChips.length
-    ? `<span class="run-metrics">${metricChips.map((m) => esc(m)).join(" · ")}</span>`
+  const tokens = hasTokens ? fmtTokens(run.tokens_total) : "—";
+  const calls = run.tool_call_count != null ? String(run.tool_call_count) : "—";
+  const duration = run.duration_ms != null ? fmtDuration(run.duration_ms) : "—";
+  const promoteHtml = isSubagent && run.agent && run.agent.name && run.agent.system_prompt && Array.isArray(run.agent.tools)
+    ? `<button class="btn small" data-action="promote" data-run-id="${esc(run.run_id)}">Reuse as specialist agent</button>`
     : "";
-  const actions = [];
-  if (isSubagent && run.agent && run.agent.name && run.agent.system_prompt && Array.isArray(run.agent.tools)) {
-    actions.push(`<button class="btn small run-again" data-action="promote" data-run-id="${esc(run.run_id)}">Reuse as specialist agent</button>`);
-  }
-  if (run.workspace) {
-    actions.push(`<button class="btn small run-again" data-action="files">Show workspace files</button>`);
-  }
+  const filesHtml = run.workspace
+    ? `<button class="btn small" data-action="files">Show workspace files</button>`
+    : "";
   item.innerHTML = `
     <summary>
-      <span class="run-task">${esc(taskPreview)}</span>
-      <span class="run-exec ${esc(executor)}">${esc(executor)}</span>
-      <span class="run-when">${who} · ${fmtWhen(run.created_at)} · ${esc(run.status)}</span>
-      ${metrics}
-      ${actions.join("")}
+      <span class="run-col run-source"><span class="run-exec ${esc(executor)}">${esc(executor)}</span></span>
+      <span class="run-col run-name">${agentName}<span class="run-id">${agentSub}</span></span>
+      <span class="run-col run-when">${fmtWhen(run.created_at)}</span>
+      <span class="run-col run-tokens" title="tokens used">${tokens}</span>
+      <span class="run-col run-calls" title="tool calls executed">${calls}</span>
+      <span class="run-col run-duration" title="wall-clock runtime">${duration}</span>
     </summary>
     <div class="run-detail">
+      <p class="run-task-line">${esc(run.task)}</p>
       ${run.answer ? `<p class="answer">${esc(run.answer)}</p>` : `<p class="decisions">(no answer text)</p>`}
       ${renderRunSteps(run)}
+      <div class="run-actions">
+        ${promoteHtml}
+        ${filesHtml}
+      </div>
       <div class="workspace-block">
         <div class="files-list"></div>
       </div>
