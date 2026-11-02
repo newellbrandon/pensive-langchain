@@ -320,6 +320,7 @@ function recentRunItem(run) {
   const item = document.createElement("details");
   item.className = "run-item";
   const isSubagent = String(run.agent_id || "").startsWith("sub-");
+  const executor = run.executor || (isSubagent ? "pensive" : "test");
   const who = isSubagent
     ? (run.agent && run.agent.name ? `subagent ${esc(run.agent.name)}` : `subagent ${esc(run.agent_id)}`)
     : `agent ${esc(run.agent_id)}`;
@@ -334,6 +335,7 @@ function recentRunItem(run) {
   item.innerHTML = `
     <summary>
       <span class="run-task">${esc(taskPreview)}</span>
+      <span class="run-exec ${esc(executor)}">${esc(executor)}</span>
       <span class="run-when">${who} · ${fmtWhen(run.created_at)} · ${esc(run.status)}</span>
       ${actions.join("")}
     </summary>
