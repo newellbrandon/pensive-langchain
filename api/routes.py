@@ -24,6 +24,8 @@ from langchain_core.messages import (
 from admin.service import get_system_prompt
 from agent.graph import build_graph
 from api.admin_routes import router as admin_router
+from api.glean_routes import callback_router as glean_callback_router
+from api.glean_routes import router as glean_router
 from api.models import ChatCompletionRequest, ChatMessage, ModelObject, ModelsListResponse
 from config import Config, configure_langsmith
 from persistence.mongo import close, get_client, verify_connection
@@ -45,6 +47,8 @@ app.add_middleware(
 )
 
 app.include_router(admin_router)
+app.include_router(glean_router)
+app.include_router(glean_callback_router)
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 

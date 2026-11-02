@@ -47,6 +47,20 @@ class Config:
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
+    # Glean MCP (enterprise search). The MCP scope is required by Glean's MCP
+    # server; the token cache file is bind-mounted so auth survives restarts.
+    GLEAN_MCP_URL: str = os.getenv(
+        "GLEAN_MCP_URL", "https://mongodb-be.glean.com/mcp/default"
+    )
+    GLEAN_SCOPE: str = os.getenv("GLEAN_SCOPE", "SEARCH DOCUMENTS ENTITIES MCP")
+    GLEAN_CLIENT_NAME: str = os.getenv("GLEAN_CLIENT_NAME", "Pensive Local Glean Agent")
+    GLEAN_REDIRECT_URI: str = os.getenv(
+        "GLEAN_REDIRECT_URI", "http://localhost:8000/glean/callback"
+    )
+    GLEAN_TOKEN_CACHE: str = os.getenv(
+        "GLEAN_TOKEN_CACHE", "/app/.glean-tokens.json"
+    )
+
     # Optional fallback for curl/local testing when no OpenWebUI session headers are present.
     USER_ID: str = os.getenv("USER_ID", "")
 

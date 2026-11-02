@@ -172,6 +172,38 @@ class SpawnSubagentTest(unittest.TestCase):
         tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
         self.assertTrue(any("not configured" in m.content for m in tool_msgs))
 
+    def test_glean_tools_offered_when_connected(self):
+        fake = mock.Mock()
+        fake.tool_schemas.return_value = [
+            {"type": "function", "function": {"name": "glean_search", "description": "d", "parameters": {"type": "object"}}}
+        ]
+        with mock.patch("agent.nodes.get_glean_client", return_value=fake):
+            result, client = self.run_node(_state(), [{"text": "ok"}])
+        names = self.tool_names(client)
+        self.assertIn("glean_search", names)
+        self.assertIn("spawn_subagent", names)
+        self.assertEqual(result["response"], "ok")
+
+    def test_glean_tool_executed_and_result_fed_back(self):
+        fake = mock.Mock()
+        fake.tool_schemas.return_value = []
+        fake.refresh_tools_if_stale = mock.AsyncMock()
+        fake.call_tool = mock.AsyncMock(
+            return_value={"name": "glean_search", "output": "[ok] glean search returned:\nhit: doc1"}
+        )
+        call = {"id": "g1", "name": "glean_search", "arguments": json.dumps({"query": "deep learning"})}
+        steps = [
+            {"text": "", "tool_calls": [call]},
+            {"text": "found doc1", "tool_calls": []},
+        ]
+        with mock.patch("agent.nodes.get_glean_client", return_value=fake):
+            result, client = self.run_node(_state(), steps)
+        self.assertEqual(result["response"], "found doc1")
+        self.assertEqual(fake.call_tool.await_args.args[0], "glean_search")
+        second = client.calls[1]["messages"]
+        tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
+        self.assertTrue(any("hit: doc1" in m.content for m in tool_msgs))
+
     def test_spawn_executes_isolated_subagent_and_returns_digest(self):
         graph = _FakeSubGraph({"response": "research digest: HNSW is the index", "tool_calls": [], "decisions": []})
         steps = [

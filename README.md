@@ -93,6 +93,16 @@ while providing persistent memory for important context:
   `project_list` / `project_read` tools (path-escape-safe, capped at 40k chars
   per read, disabled when `PENSIVE_PROJECTS_ROOT` is unset). The OKF knowledge
   bundle lives under `okf/`.
+- **Glean enterprise search (MCP, no agentengine).** Pensive connects to the
+  Glean MCP server (`GLEAN_MCP_URL`) with a native OAuth2 dynamic-client flow
+  (DCR + PKCE; the `MCP` scope is required by Glean) and a bind-mounted token
+  cache. Run `python scripts/glean_auth.py` once — or use the console's
+  **Glean** tab (Connect button, the OAuth callback rides the existing
+  `localhost:8000` port) — and the ~13 discovered Glean tools become
+  server-side tools in main chats (`glean_search`, `glean_chat`,
+  `glean_read_document`, …). Calls are permission-scoped to the signed-in
+  user. **Boundaries:** this is a single-user local-dev credential — never
+  ship or upload the token cache (` .glean-tokens.json`).
 - Connect any OpenAI chat/responses client to `http://<host>:8000/v1` with model
   `pensive` (see [OpenWebUI Configuration](#openwebui-configuration) and the OpenCode
   provider config in the OpenCode docs).
