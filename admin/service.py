@@ -610,6 +610,7 @@ def list_recent_runs(
     *,
     sort_by: str = "created_at",
     order: str = "desc",
+    executor: Optional[str] = None,
     collection: Collection | None = None,
 ) -> list[dict]:
     """Most recent runs across ALL agents (lab agents and ephemeral spawned
@@ -618,15 +619,21 @@ def list_recent_runs(
     ``sort_by`` is a whitelisted field (``created_at`` or an efficiency
     metric: ``tokens_in``, ``tokens_out``, ``tokens_total``, ``duration_ms``,
     ``tool_call_count``, ``step_count``); ``order`` is ``asc`` or ``desc``
-    (default: newest first).
+    (default: newest first). ``executor`` narrows to ``pensive`` (subagents
+    spawned from a chat) or ``test`` (console lab-agent runs); legacy runs
+    are matched on their derived tag.
     """
     if sort_by not in RUN_SORT_FIELDS:
         raise ValueError(f"unknown sort field: {sort_by}")
+    if executor is not None and executor not in ("pensive", "test"):
+        raise ValueError(f"unknown executor: {executor}")
     descending = order != "asc"
     runs = [
         _public_run(d)
         for d in _runs_collection(collection).find({})
     ]
+    if executor is not None:
+        runs = [r for r in runs if r["executor"] == executor]
     runs.sort(
         key=lambda run: run.get(sort_by) if sort_by == "created_at" else int(run.get(sort_by) or 0),
         reverse=descending,

@@ -100,19 +100,23 @@
       <div class="card">
         <div class="card-head-row">
           <h2 class="card-title">Agent workflows</h2>
-          <label class="field">
-            <span>Sort</span>
-            <select id="runs-sort">
-              <option value="created_at:desc">Newest first</option>
-              <option value="created_at:asc">Oldest first</option>
-              <option value="tokens_total:desc">Most tokens used</option>
-              <option value="tokens_total:asc">Fewest tokens used</option>
-              <option value="duration_ms:desc">Slowest run</option>
-              <option value="duration_ms:asc">Fastest run</option>
-              <option value="tool_call_count:desc">Most tool calls</option>
-              <option value="step_count:desc">Most steps</option>
-            </select>
-          </label>
+          <div class="chip-groups">
+            <div class="chip-group" id="runs-executor-chips">
+              <button class="chip active" data-executor="">All</button>
+              <button class="chip" data-executor="pensive">Pensive</button>
+              <button class="chip" data-executor="test">Test</button>
+            </div>
+            <div class="chip-group" id="runs-sort-chips">
+              <button class="chip active" data-sort="created_at:desc">Newest</button>
+              <button class="chip" data-sort="created_at:asc">Oldest</button>
+              <button class="chip" data-sort="tokens_total:desc">Most tokens</button>
+              <button class="chip" data-sort="tokens_total:asc">Fewest tokens</button>
+              <button class="chip" data-sort="duration_ms:desc">Slowest</button>
+              <button class="chip" data-sort="duration_ms:asc">Fastest</button>
+              <button class="chip" data-sort="tool_call_count:desc">Most tools</button>
+              <button class="chip" data-sort="step_count:desc">Most steps</button>
+            </div>
+          </div>
         </div>
         <p class="hint">Every agent workflow, newest first by default — <em>pensive</em> runs are subagents spawned from a chat, <em>test</em> runs are lab agents started here. Sort by tokens, duration, or activity to spot low-token, high-performing agents worth promoting into reusable tools. Subagent rows offer <em>Reuse as specialist agent</em>.</p>
         <div id="recent-runs" class="runs-list"></div>

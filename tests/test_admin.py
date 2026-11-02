@@ -443,6 +443,29 @@ class AgentHistoryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             admin.list_recent_runs(collection=self.coll, sort_by="tokens_magic")
 
+    def test_list_recent_runs_filters_by_executor(self):
+        now = datetime.now(timezone.utc)
+        for i, (agent_id, executor) in enumerate([("sub-a", "pensive"), ("ag_1", "test"), ("sub-b", "pensive")]):
+            doc = self._run_doc(f"f{i}", (now - timedelta(minutes=i)).isoformat())
+            doc["agent_id"] = agent_id
+            doc["executor"] = executor
+            self.coll.docs.append(doc)
+        pensive = admin.list_recent_runs(collection=self.coll, executor="pensive")
+        self.assertEqual([r["agent_id"] for r in pensive], ["sub-a", "sub-b"])
+        test = admin.list_recent_runs(collection=self.coll, executor="test")
+        self.assertEqual([r["agent_id"] for r in test], ["ag_1"])
+        # legacy rows (no stored executor) still match via the derived tag
+        legacy = self._run_doc("leg1", (now - timedelta(days=1)).isoformat())
+        legacy["agent_id"] = "sub-zzz"
+        self.coll.docs.append(legacy)
+        derived = admin.list_recent_runs(collection=self.coll, executor="pensive")
+        self.assertIn("leg1", [r["run_id"] for r in derived])
+
+    def test_list_recent_runs_rejects_unknown_executor(self):
+        admin.record_run("ag_1", "t", {"answer": "a"}, collection=self.coll)
+        with self.assertRaises(ValueError):
+            admin.list_recent_runs(collection=self.coll, executor="bogus")
+
     def test_record_run_keeps_step_history(self):
         steps = [
             {
@@ -920,8 +943,8 @@ _client = TestClient(_api_app)
 def test_list_recent_runs_endpoint_returns_global_feed(monkeypatch):
     captured = {}
 
-    def fake_list_recent_runs(limit=25, sort_by="created_at", order="desc"):
-        captured["kwargs"] = {"limit": limit, "sort_by": sort_by, "order": order}
+    def fake_list_recent_runs(limit=25, sort_by="created_at", order="desc", executor=None, **kw):
+        captured["kwargs"] = {"limit": limit, "sort_by": sort_by, "order": order, "executor": executor}
         return [
             {
                 "run_id": "r1",
@@ -955,6 +978,7 @@ def test_list_recent_runs_endpoint_returns_global_feed(monkeypatch):
         "limit": 7,
         "sort_by": "tokens_total",
         "order": "asc",
+        "executor": None,
     }
 
 
@@ -1133,6 +1157,24 @@ def test_merge_strips_empty_lines_and_consolidates_suspicious_rows(monkeypatch):
     content = store.puts[0][1]["content"]
     assert content.count("\n") == 0  # consolidated + trailing blank line stripped
     assert "vision" in content
+
+
+def test_list_recent_runs_endpoint_filters_by_executor(monkeypatch):
+    captured = {}
+
+    def fake_list(limit=25, sort_by="created_at", order="desc", executor=None, **kw):
+        captured["kwargs"] = {"limit": limit, "sort_by": sort_by, "order": order, "executor": executor}
+        return []
+
+    monkeypatch.setattr(admin, "list_recent_runs", fake_list)
+    response = _client.get("/api/admin/runs?executor=test")
+    assert response.status_code == 200
+    assert captured["kwargs"]["executor"] == "test"
+
+
+def test_list_recent_runs_endpoint_rejects_unknown_executor():
+    response = _client.get("/api/admin/runs?executor=aliens")
+    assert response.status_code == 400
 
 
 def test_memory_types_describe_all_four():
