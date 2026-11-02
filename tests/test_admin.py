@@ -392,6 +392,57 @@ class AgentHistoryTest(unittest.TestCase):
         self.assertEqual(by_id["old2"]["executor"], "test")
         self.assertEqual(by_id[run["run_id"]]["executor"], "pensive")
 
+    def test_record_run_round_trips_token_and_duration_metrics(self):
+        run = admin.record_run(
+            "sub-abc123",
+            "search glean",
+            {
+                "answer": "digest",
+                "decisions": [],
+                "tool_calls": [{"name": "glean_search", "output": "[ok]"}],
+                "steps": [],
+                "workspace": "/w",
+                "tokens_in": 1200,
+                "tokens_out": 340,
+                "duration_ms": 8123,
+                "tool_call_count": 1,
+                "step_count": 2,
+            },
+            executor="pensive",
+            collection=self.coll,
+        )
+        self.assertEqual(run["tokens_in"], 1200)
+        self.assertEqual(run["tokens_out"], 340)
+        self.assertEqual(run["tokens_total"], 1540)
+        self.assertEqual(run["duration_ms"], 8123)
+        self.assertEqual(run["tool_call_count"], 1)
+        self.assertEqual(run["step_count"], 2)
+        # legacy runs (no metrics) expose zeros without breaking
+        self.coll.docs.append(self._run_doc("old1", "2026-09-01T00:00:00.000000+00:00"))
+        legacy = admin.list_recent_runs(collection=self.coll)[-1]
+        self.assertEqual(legacy["tokens_total"], 0)
+        self.assertIsNone(legacy["duration_ms"])
+
+    def test_list_recent_runs_sorts_by_metrics(self):
+        base = datetime.now(timezone.utc)
+        for i, (tin, tout) in enumerate([(500, 50), (100, 10), (300, 30)]):
+            doc = self._run_doc(f"r{i}", (base - timedelta(minutes=i)).isoformat())
+            doc.update(tokens_in=tin, tokens_out=tout)
+            self.coll.docs.append(doc)
+
+        asc = admin.list_recent_runs(collection=self.coll, sort_by="tokens_total", order="asc")
+        self.assertEqual([r["tokens_total"] for r in asc], [110, 330, 550])
+        desc = admin.list_recent_runs(collection=self.coll, sort_by="tokens_total", order="desc")
+        self.assertEqual([r["tokens_total"] for r in desc], [550, 330, 110])
+        # columns with units are sortable too
+        by_duration = admin.list_recent_runs(collection=self.coll, sort_by="duration_ms", order="asc")
+        self.assertEqual(len(by_duration), 3)
+
+    def test_list_recent_runs_rejects_unknown_sort_field(self):
+        admin.record_run("ag_1", "t", {"answer": "a"}, collection=self.coll)
+        with self.assertRaises(ValueError):
+            admin.list_recent_runs(collection=self.coll, sort_by="tokens_magic")
+
     def test_record_run_keeps_step_history(self):
         steps = [
             {
@@ -462,6 +513,19 @@ class AgentRunTest(unittest.TestCase):
             "system_prompt": "You are a strict tester.",
             "tools": admin.DEFAULT_AGENT_TOOLS,
         }
+
+    def test_run_reports_token_and_duration_metrics(self):
+        graph = _FakeGraph(final_state={"response": "all green"})
+        result = _run(admin.run_agent(self.agent, "Test the math module", graph))
+        self.assertEqual(result["answer"], "all green")
+        # every run carries usage + timing metrics so the workflows list can
+        # rank agents by token efficiency
+        self.assertIn("tokens_in", result)
+        self.assertIn("tokens_out", result)
+        self.assertIn("duration_ms", result)
+        self.assertIsInstance(result["duration_ms"], int)
+        self.assertEqual(result["tool_call_count"], 0)
+        self.assertEqual(result["step_count"], 0)
 
     def test_run_uses_isolated_scope_agent_prompt_and_tools(self):
         graph = _FakeGraph(
@@ -854,10 +918,11 @@ _client = TestClient(_api_app)
 
 
 def test_list_recent_runs_endpoint_returns_global_feed(monkeypatch):
-    monkeypatch.setattr(
-        admin,
-        "list_recent_runs",
-        lambda limit=25: [
+    captured = {}
+
+    def fake_list_recent_runs(limit=25, sort_by="created_at", order="desc"):
+        captured["kwargs"] = {"limit": limit, "sort_by": sort_by, "order": order}
+        return [
             {
                 "run_id": "r1",
                 "agent_id": "sub-4dffbf849232",
@@ -869,15 +934,33 @@ def test_list_recent_runs_endpoint_returns_global_feed(monkeypatch):
                 "workspace": "",
                 "status": "completed",
                 "created_at": "2026-11-02T01:02:42+00:00",
+                "tokens_in": 1200,
+                "tokens_out": 300,
+                "tokens_total": 1500,
+                "duration_ms": 9000,
+                "tool_call_count": 2,
+                "step_count": 1,
+                "executor": "pensive",
             }
-        ],
-    )
-    response = _client.get("/api/admin/runs")
+        ]
+
+    monkeypatch.setattr(admin, "list_recent_runs", fake_list_recent_runs)
+    response = _client.get("/api/admin/runs?sort_by=tokens_total&order=asc&limit=7")
     assert response.status_code == 200
     body = response.json()
     assert body["runs"][0]["agent_id"] == "sub-4dffbf849232"
-    assert body["runs"][0]["status"] == "completed"
-    assert body["runs"][0]["task"].startswith("Search EXCLUSIVELY")
+    assert body["runs"][0]["executor"] == "pensive"
+    assert body["runs"][0]["tokens_total"] == 1500
+    assert captured["kwargs"] == {
+        "limit": 7,
+        "sort_by": "tokens_total",
+        "order": "asc",
+    }
+
+
+def test_list_recent_runs_rejects_unknown_sort_field():
+    response = _client.get("/api/admin/runs?sort_by=tokens_magic")
+    assert response.status_code == 400
 
 
 def test_memory_types_describe_all_four():

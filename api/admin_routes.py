@@ -157,11 +157,21 @@ async def list_agent_runs(agent_id: str) -> dict:
 
 
 @router.get("/runs")
-async def list_recent_runs(limit: int = 25) -> dict:
-    """Global execution feed: latest runs across lab agents AND spawned
-    subagents (``sub-*``), so delegated work shows up in the console."""
+async def list_recent_runs(
+    limit: int = 25,
+    sort_by: str = "created_at",
+    order: str = "desc",
+) -> dict:
+    """Global workflow feed: latest runs across lab agents AND spawned
+    subagents (``sub-*``). Sortable by ``created_at`` or efficiency metrics
+    (``tokens_total``, ``duration_ms``, …) to hunt for low-token,
+    high-performing agents worth promoting into reusable tools."""
     limit = max(1, min(int(limit), 100))
-    return {"runs": admin.list_recent_runs(limit=limit)}
+    try:
+        runs = admin.list_recent_runs(limit=limit, sort_by=sort_by, order=order)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    return {"runs": runs}
 
 
 @router.get("/agents/{agent_id}/workspace")

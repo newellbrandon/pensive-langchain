@@ -41,9 +41,11 @@ def _state(offer=True, tools=None):
 
 
 class _Result:
-    def __init__(self, text, tool_calls):
+    def __init__(self, text, tool_calls, tokens_in=0, tokens_out=0):
         self.text = text
         self.tool_calls = tool_calls
+        self.tokens_in = tokens_in
+        self.tokens_out = tokens_out
 
 
 class _FakeClient:
@@ -231,6 +233,32 @@ class SpawnSubagentTest(unittest.TestCase):
         second = client.calls[1]["messages"]
         tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
         self.assertTrue(any("internal hit" in m.content for m in tool_msgs))
+
+    def test_generate_loop_accumulates_usage_tokens(self):
+        # Each LLM round-trip reports usage; the node must sum it across the
+        # whole server-tool loop so runs can be ranked by token efficiency.
+        graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})
+        steps = [
+            {"text": "", "tool_calls": [_spawn_call("s1", "t1")], "tokens_in": 110, "tokens_out": 22},
+            {"text": "done", "tool_calls": [], "tokens_in": 330, "tokens_out": 44},
+        ]
+
+        class _TokenClient(_FakeClient):
+            async def acomplete(self, messages, tools=None, tool_choice=None):
+                step = self.steps[min(len(self.calls), len(self.steps) - 1)]
+                self.calls.append({"messages": list(messages), "tools": tools})
+                return _Result(
+                    step.get("text", ""),
+                    step.get("tool_calls", []),
+                    tokens_in=step.get("tokens_in", 0),
+                    tokens_out=step.get("tokens_out", 0),
+                )
+
+        self.mock_get_client.return_value = _TokenClient(steps)
+        self.mock_graph.return_value = graph
+        result = _run(nodes.generate_response(_state()))
+        self.assertEqual(result["tokens_in"], 440)
+        self.assertEqual(result["tokens_out"], 66)
 
     def test_spawn_executes_isolated_subagent_and_returns_digest(self):
         graph = _FakeSubGraph({"response": "research digest: HNSW is the index", "tool_calls": [], "decisions": []})

@@ -145,6 +145,33 @@ class TestResponsesClient:
         assert "thinking" not in text
         assert "ignored" not in text
 
+    def test_extracts_usage_tokens(self):
+        payload = _sample_response("hi")
+        payload["usage"] = {"input_tokens": 123, "output_tokens": 45}
+        session, factory = _fake_http(payload)
+        client = ResponsesClient(
+            url="https://gateway.example/v1/responses",
+            api_key="secret-key",
+            model="gpt-5.6-luna",
+        )
+
+        with patch("httpx.AsyncClient", factory):
+            result = _run(client.acomplete([HumanMessage(content="Hi")]))
+
+        assert result.tokens_in == 123
+        assert result.tokens_out == 45
+        assert result.text == "hi"
+
+    def test_usage_tokens_default_to_zero_when_absent(self):
+        session, factory = _fake_http(_sample_response("hi"))
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", factory):
+            result = _run(client.acomplete([HumanMessage(content="Hi")]))
+
+        assert result.tokens_in == 0
+        assert result.tokens_out == 0
+
     def test_returns_empty_string_when_no_message_output(self):
         session, factory = _fake_http({"id": "resp_1", "output": []})
         client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
