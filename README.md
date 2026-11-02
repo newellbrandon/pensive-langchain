@@ -11,23 +11,35 @@ The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.ope
 
 ### System overview
 
-OpenWebUI sends chat requests to the FastAPI layer, which invokes a compiled LangGraph workflow. MongoDB holds short-term thread state (checkpointer) and long-term facts (store with vector search).
+OpenWebUI or a coding harness sends chat requests to the FastAPI layer, which invokes a compiled LangGraph workflow. MongoDB holds short-term thread state (checkpointer) and long-term facts (store with vector search). On top of the core chat loop, Pensive runs a **server-tool layer** (subagent delegation, project browsing, Glean enterprise search), an **agent lab** (isolated, runnable/rerunnable agents) and a **management console** at `/ui` — with every agent workflow recorded as sortable, metric-bearing run history.
 
 Pensive exposes both OpenAI-compatible protocols: **Chat Completions** (`POST /v1/chat/completions`) and the **Responses API** (`POST /v1/responses`). OpenWebUI can be pointed at either connection type.
 
 ```mermaid
 flowchart TD
-  owui[OpenWebUI] -->|POST /v1/chat/completions| api[FastAPI]
-  api -->|"ainvoke / astream"| lgWorkflow[Compiled LangGraph]
-  lgWorkflow --> llm[OpenAI-compatible LLM]
-  lgWorkflow -.->|"MongoDBSaver - every superstep"| mongoCP["checkpoints<br/>checkpoint_writes"]
-  lgWorkflow -->|MongoDBStore| mongoStore[(agent_memories)]
-  mongoStore -->|"vector search + save"| embed[Voyage embeddings]
+  client[OpenWebUI / coding harness] -->|"POST /v1/chat/completions · /v1/responses"| api[FastAPI]
+  api -->|"ainvoke / astream"| lg[Compiled LangGraph]
+  lg --> llm["OpenAI-compatible LLM"]
+  lg -.->|"MongoDBSaver · every superstep"| checkpoints["checkpoints<br/>checkpoint_writes"]
+  lg -->|"MongoDBStore · typed namespaces"| memories[("agent_memories")]
+  memories -->|"vector search + iterate-on-merge"| embed["Voyage embeddings"]
+
+  lg -.->|"spawn_subagent · digest only"| sub["Isolated subagent<br/>memory agent:sub-* · own workspace"]
+  sub -->|"runs the same graph"| lg
+  lg -.->|"glean_* tools · MCP + OAuth2"| glean[("Glean enterprise search")]
+  lg -.->|"project_list / project_read"| projects[("~/projects · read-only")]
+
+  subgraph console["Pensive Console — /ui"]
+    ui["Memories · Agents lab · Glean · System Prompt"]
+  end
+  ui -->|"run_agent · same graph"| lg
+  ui -->|"records executed workflows"| runs[("pensive_agent_runs<br/>pensive/test tags · metrics · 1500/30d retention")]
+  api --> ui
 ```
 
 ### LangGraph workflow
 
-Each chat message runs the four nodes below. OpenWebUI streams the **decision** from each step before the final answer — the second line in each node label matches what you see in the demo screenshots.
+Every chat message — and every agent-lab/subagent run — runs the four nodes below. The graph also carries a **server-tool loop inside `generate_response`** (offered only in main-context chats): the model may delegate via `spawn_subagent`, browse host projects (`project_list` / `project_read`), or call the discovered Glean tools (`glean_*`); results are executed server-side and fed back until the model produces a final answer. OpenWebUI streams the **decision** from each step before the final answer — the second line in each node label matches what you see in the demo screenshots.
 
 The checkpointer persists graph state after every superstep (not only these four nodes), which is why a single message produces multiple `checkpoints` and `checkpoint_writes` documents.
 
@@ -38,15 +50,20 @@ flowchart TD
   analyze -->|"needs_memory"| search["search_long_term_memory<br/>Search Long Term Memory"]
   analyze -->|"skip"| generate["generate_response<br/>Generate Response"]
 
-  search -->|"store.search · 4 types"| agentMem[(agent_memories)]
+  search -->|"store.search · 4 types"| agentMem[("agent_memories")]
   search --> generate
 
-  generate -.->|OpenAI Responses API| llmNode{{LLM}}
+  generate -.->|"OpenAI Responses API"| llmNode[["LLM"]]
+  generate -.->|"server-tool loop: spawn_subagent · project_* · glean_*"| serverTools["server tools<br/>budgeted · results fed back"]
   generate --> save["save_memory<br/>Save Memory"]
 
   save -->|"LLM extract + classify type"| llmNode
-  save -->|"store.put · typed namespace"| agentMem
+  save -->|"store.put · typed namespace · iterate-on-merge"| agentMem
   save --> endNode((END))
+
+  agentLab["Agents lab — run_agent<br/>memory agent:&lt;id&gt; scope"] -->|"same graph"| startNode
+  agentLab -.->|"workflow history"| runs2[("pensive_agent_runs<br/>pensive/test · tokens · duration")]
+  runs2 --> agentLab
 
   analyze -.-> cpNote["checkpoints / checkpoint_writes"]
   search -.-> cpNote
@@ -114,13 +131,14 @@ while providing persistent memory for important context:
 ## Pensive Console (Web UI)
 
 The management UI lives at **`http://<host>:8000/ui`** (MongoDB visual theme — dark navy
-canvas, mongo-green accents) and powers four workflows:
+canvas, mongo-green accents) and powers four tabs:
 
 | Tab | What you can do |
 | --- | --------------- |
 | **Memories** | Browse and curate the four long-term memory types per user — **Semantic** (user facts and preferences), **Episodic** (session events, decisions, outcomes), **Taxonomic** (domain vocabulary and reusable concepts like corporate policies), **Procedural** (reusable workflows and agent runbooks — skills). Correct a memory and it is **re-embedded automatically** (the write goes through the LangGraph store's vector index); prune to delete. Saves **iterate instead of duplicating**: repeated facts merge into the existing memory (vector-similarity match with lexical fallback, normalized labels), and a **Merge duplicates** button groups semantically similar memories into one complete curated memory per group — near-identical line items collapse (longer version wins) and each group gets an LLM consolidation pass so the result reads as one memory, not a concatenation. The live store went from 101 → 31 memories with the content preserved. |
 | **System Prompt** | View and change the assistant persona injected at the top of every main-context request. Persisted in MongoDB; leave empty to restore the built-in default. |
-| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. Leave the name blank to **auto-generate** one (e.g. `coral-scribe-3621`), and tools empty to enable the built-in sandboxed tools (`write_file`, `append_file`, `read_file`, `run_command`, `web_search`, `web_extract`). A **Agent workflows** panel (below the create form) lists every workflow, newest first by default — each row tagged **pensive** (a subagent the main Pensive context spawned) or **test** (a lab agent run started here), with expandable transcripts, **efficiency metrics** (tokens used, duration, tool-call/step counts), and a **sort dropdown** (newest/oldest, most/fewest tokens, slowest/fastest, most tool calls, most steps) for hunting low-token, high-performing agents worth promoting. A **Reuse as specialist agent** button on subagent rows turns a capable subagent (say, a great Glean researcher) into a permanent, rerunnable agent with its own memory scope. **Edit any agent** (Edit button loads its name/prompt/tools back into the form), and open **Runs & artifacts** on a card to review past runs — each run shows a **step-by-step transcript** (model response, decisions, and every executed tool call with full arguments and results), a one-click **Run again** button, and a **workspace file browser** (list + content preview via `GET /agents/{id}/workspace`). |
+| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. Leave the name blank to **auto-generate** one (e.g. `coral-scribe-3621`), and tools empty to enable the built-in sandboxed tools (`write_file`, `append_file`, `read_file`, `run_command`, `web_search`, `web_extract`). An **Agent workflows** panel (below the create form) lists every workflow, newest first by default — each row tagged **pensive** (a subagent the main Pensive context spawned) or **test** (a lab agent run started here), with expandable transcripts, **efficiency metrics** (tokens used, duration, tool-call/step counts), and a **sort dropdown** (newest/oldest, most/fewest tokens, slowest/fastest, most tool calls, most steps) for hunting low-token, high-performing agents worth promoting. A **Reuse as specialist agent** button on subagent rows turns a capable subagent (say, a great Glean researcher) into a permanent, rerunnable agent with its own memory scope. **Edit any agent** (Edit button loads its name/prompt/tools back into the form), and open **Runs & artifacts** on a card to review past runs — each run shows a **step-by-step transcript** (model response, decisions, and every executed tool call with full arguments and results), a one-click **Run again** button, and a **workspace file browser** (list + content preview via `GET /agents/{id}/workspace`). |
+| **Glean** | Connect Pensive to the Glean MCP server (MongoDB enterprise search) with a native **OAuth2 dynamic-client flow** (DCR + PKCE; the `MCP` scope is required by Glean): status + token expiry, **Connect** (opens the authorization screen; the callback rides the existing `localhost:8000` port), **Refresh token**, **Disconnect**, and a **smoke-test box** that calls any discovered tool (`search: …` runs `glean_search`). Once connected, the ~13 discovered Glean tools are available to main chats **and every agent run** as `glean_*` server tools, permission-scoped to the signed-in user. The token cache (` .glean-tokens.json`) is gitignored and bind-mounted — a single-user dev credential, never to be shipped. |
 
 **Agent tool execution.** Agent tool calls are actually *executed*: file and shell tools run inside a per-agent workspace directory (`./agent-workspaces/<agent_id>/`, mounted into the container so built apps survive restarts), results are fed back to the model in a loop (up to 24 steps), and transient upstream failures or broken tool-call payloads are retried automatically. Every tool failure becomes a model-visible `[error]` result — never a crash — with actionable guidance (invalid JSON is reported with reissue instructions; large files should be built with `append_file`). Completed runs are persisted (`pensive_agent_runs`) with their answer, decisions, and executed tool calls so past agents can be reviewed and re-run. The workflow list is **retained to at most 1500 runs and none older than 30 days** — whichever limit is hit first, enforced after every recorded run.
 
@@ -154,8 +172,16 @@ The pipeline (ported from the leafy10 agent in `memory/memories.py`) works like 
 3. **Generation** — the dated, newest-first memory block is injected as a separate
    system message and personalized into the reply.
 4. **Write-back** (`save_memory`) — the LLM extracts durable facts and classifies
-   each into one of the four types; a re-saved `(type, label)` supersedes the prior
-   value (last-write-wins). Enable rerank by setting `VOYAGE_API_KEY` in `.env`.
+   each into one of the four types. Saves **iterate instead of duplicating**:
+   labels are normalized (casing/whitespace collapse), and before inserting, a
+   fact that vector-matches an existing same-type memory (≥ 0.85 similarity,
+   lexical fallback) is **merged into it** — content combined, canonical label
+   and earliest `recorded_at` kept — instead of stored as a new record. The
+   console's **Merge duplicates** cleanup groups semantically similar memories
+   per type and curates each group into ONE memory: near-identical lines
+   collapse to their longer version, then an LLM consolidation pass rewrites
+   the fragments as a single flowing memory (best-effort, heuristic fallback).
+   Enable rerank by setting `VOYAGE_API_KEY` in `.env`.
 
 ## Requirements
 
@@ -405,30 +431,38 @@ curl -N http://localhost:8000/v1/chat/completions \
 ```
 pensive/
 ├── Dockerfile              # container image (+ pytest for the agent lab)
-├── docker-compose.yml      # docker compose up -d --build (mounts agent-workspaces/)
+├── docker-compose.yml      # mounts agent-workspaces/, ~/projects (ro), glean token cache
 ├── main.py                 # uvicorn entry
 ├── config.py               # environment configuration
 ├── agent/
-│   ├── graph.py            # LangGraph workflow
-│   ├── nodes.py            # analyze_intent, search, generate, save
-│   └── state.py            # AgentState schema
+│   ├── graph.py            # LangGraph workflow (+ subagent wiring)
+│   ├── nodes.py            # analyze_intent, search, generate (server-tool loop), save
+│   └── state.py            # AgentState schema (incl. token accounting)
 ├── admin/
-│   ├── executor.py         # sandboxed agent tools (files, shell, web search)
-│   └── service.py          # agent registry, run loop, memory curation, system prompt
+│   ├── executor.py         # sandboxed agent tools (files, shell, web, projects)
+│   └── service.py          # agent registry, run loop + metrics, memory curation, run history
 ├── memory/
-│   └── memories.py         # four-type memory pipeline (semantic/episodic/taxonomic/procedural)
+│   └── memories.py         # four-type memory pipeline (iterate-on-merge + curated merge)
+├── glean/
+│   ├── oauth.py            # MCP dynamic-client OAuth2 (discovery, DCR, PKCE, refresh)
+│   ├── client.py           # MCP client wrapper (one session per operation)
+│   ├── token_cache.py      # bind-mounted token cache
+│   └── transport.py
 ├── api/
 │   ├── routes.py           # OpenAI-compatible FastAPI routes
-│   ├── admin_routes.py     # /api/admin REST API (UI + agent lab)
+│   ├── admin_routes.py     # /api/admin REST API (UI + agent lab + run feed)
+│   ├── glean_routes.py     # /api/admin/glean + OAuth callback at /glean/callback
 │   └── models.py           # request/response schemas
 ├── persistence/
 │   └── mongo.py            # MongoDBSaver + MongoDBStore
 ├── static/                 # Pensive Console UI (MongoDB theme)
+├── tests/                  # 176 tests: graph, memories, glean OAuth/client, agents, API
 ├── utils/
-│   └── llm.py              # OpenAI Responses API + Voyage embeddings clients
+│   └── llm.py              # OpenAI Responses API (+ usage) + Voyage embeddings clients
 ├── agent-workspaces/       # per-agent sandboxes (gitignored, host-mounted)
 └── scripts/
-    └── setup_memory_index.py
+    ├── setup_memory_index.py
+    └── glean_auth.py       # one-shot host-side Glean OAuth (loopback + fragment relay)
 ```
 
 ## Background
