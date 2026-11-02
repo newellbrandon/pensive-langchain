@@ -20,6 +20,7 @@ from typing import Any, Collection, Optional
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, safe_workspace_path, workspace_root
+from glean.client import get_glean_client
 from config import Config
 from memory.memories import MEMORY_TYPES, namespace
 from persistence.mongo import get_client, get_store
@@ -458,6 +459,7 @@ async def _invoke_agent_step(
     thread_id: str,
     transcript: list,
     task: str,
+    tools: list | None = None,
 ) -> tuple[str, list[dict], list[dict]]:
     """Run the graph once for the agent; returns (answer, tool_calls, decisions)."""
     input_state: dict = {
@@ -472,7 +474,7 @@ async def _invoke_agent_step(
         "memory_query": "",
         "memory_candidates": [],
         "memory_context": [],
-        "tools": agent.get("tools") or DEFAULT_AGENT_TOOLS,
+        "tools": tools if tools is not None else (agent.get("tools") or DEFAULT_AGENT_TOOLS),
         "tool_choice": None,
         "tool_calls": [],
         "system_prompt": agent.get("system_prompt") or "",
@@ -534,6 +536,22 @@ async def run_agent(
     workspace = workspace_root(agent_id, base=workspace_base)
     workspace.mkdir(parents=True, exist_ok=True)
 
+    # Every agent run (lab agents AND spawned subagents) carries the discovered
+    # Glean tools, so "search exclusively via Glean" tasks never fall back to
+    # the public web tools. Schemas are refreshed (~once a minute) and deduped
+    # against the agent's own tool list.
+    agent_tools = list(agent.get("tools") or DEFAULT_AGENT_TOOLS)
+    try:
+        await get_glean_client().refresh_tools_if_stale()
+    except Exception:  # noqa: BLE001 — best-effort; no credentials is fine
+        logger.debug("Glean snapshot refresh skipped", exc_info=True)
+    existing_names = {(t.get("function") or {}).get("name") for t in agent_tools}
+    for schema in get_glean_client().tool_schemas():
+        name = (schema.get("function") or {}).get("name")
+        if name and name not in existing_names:
+            agent_tools.append(schema)
+            existing_names.add(name)
+
     transcript: list = [HumanMessage(content=task)]
     decisions_all: list[dict] = []
     executed_calls: list[dict] = []
@@ -550,7 +568,7 @@ async def run_agent(
         retries = 0
         while True:
             answer, tool_calls, decisions = await _invoke_agent_step(
-                graph, agent, user_id, thread_id, transcript, task
+                graph, agent, user_id, thread_id, transcript, task, tools=agent_tools
             )
             decisions_all.extend(decisions)
             needs_retry = (tool_calls and _all_unparseable_arguments(tool_calls)) or (

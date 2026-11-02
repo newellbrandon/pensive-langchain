@@ -369,6 +369,22 @@ class AgentRunTest(unittest.TestCase):
         config = graph.seen["config"]
         self.assertTrue(config["configurable"]["thread_id"].startswith("agent:ag_123:"))
 
+    def test_agent_runs_get_glean_tools_when_discovered(self):
+        glean_tool = {
+            "type": "function",
+            "function": {"name": "glean_search", "description": "d", "parameters": {"type": "object"}},
+        }
+        fake_client = mock.Mock()
+        fake_client.tool_schemas.return_value = [glean_tool]
+        fake_client.refresh_tools_if_stale = mock.AsyncMock()
+        graph = _FakeGraph(final_state={"response": "ok"})
+        with mock.patch("admin.service.get_glean_client", return_value=fake_client):
+            _run(admin.run_agent(self.agent, "Search Glean for X", graph))
+        tools = graph.seen["input_state"]["tools"]
+        names = [(t.get("function") or {}).get("name") for t in tools]
+        self.assertIn("glean_search", names)
+        self.assertTrue(fake_client.refresh_tools_if_stale.called)
+
 
 class _ScriptedGraph:
     """Yields scripted final states, one per invocation."""

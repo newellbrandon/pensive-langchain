@@ -322,9 +322,11 @@ DEFAULT_AGENT_TOOLS: list[dict] = [
     ),
     _function(
         "web_search",
-        "Search the web (DuckDuckGo text search) for a query. Returns up to "
-        "max_results (default 5, max 10) results with title, URL, and a short "
-        "snippet. Use web_extract to read the full content of a result URL.",
+        "Search the PUBLIC web (DuckDuckGo) for a query. Use this only for "
+        "external/public content — for internal or company knowledge, use "
+        "glean_search instead. Returns up to max_results (default 5, max 10) "
+        "results with title, URL, and a short snippet. Use web_extract to read "
+        "the full content of a result URL.",
         {"query": {"type": "string", "description": "Web search query"},
          "max_results": {"type": "integer", "description": "Results to return (default 5, max 10)"}},
         ["query"],
