@@ -204,6 +204,32 @@ class SpawnSubagentTest(unittest.TestCase):
         tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
         self.assertTrue(any("hit: doc1" in m.content for m in tool_msgs))
 
+    def test_glean_tool_executed_even_without_server_flag(self):
+        # Subagents/agent-lab runs have offer_server_tools=False but must still
+        # be able to use Glean when the tool is in their (default) tool list.
+        fake = mock.Mock()
+        fake.tool_schemas.return_value = []
+        fake.refresh_tools_if_stale = mock.AsyncMock()
+        fake.call_tool = mock.AsyncMock(
+            return_value={"name": "glean_search", "output": "[ok] glean search returned:\ninternal hit"}
+        )
+        glean_tool = {
+            "type": "function",
+            "function": {"name": "glean_search", "description": "d", "parameters": {"type": "object"}},
+        }
+        call = {"id": "g1", "name": "glean_search", "arguments": json.dumps({"query": "x"})}
+        steps = [
+            {"text": "", "tool_calls": [call]},
+            {"text": "internal hit it is", "tool_calls": []},
+        ]
+        with mock.patch("agent.nodes.get_glean_client", return_value=fake):
+            result, client = self.run_node(_state(offer=False, tools=[glean_tool]), steps)
+        self.assertEqual(result["response"], "internal hit it is")
+        self.assertEqual(fake.call_tool.await_args.args[0], "glean_search")
+        second = client.calls[1]["messages"]
+        tool_msgs = [m for m in second if isinstance(m, ToolMessage)]
+        self.assertTrue(any("internal hit" in m.content for m in tool_msgs))
+
     def test_spawn_executes_isolated_subagent_and_returns_digest(self):
         graph = _FakeSubGraph({"response": "research digest: HNSW is the index", "tool_calls": [], "decisions": []})
         steps = [
