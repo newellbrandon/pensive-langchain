@@ -65,6 +65,43 @@ EXTRACT_PROMPT = (
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 _JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
 
+# Same-fact detection for memory iteration & cleanup: a peer is "the same
+# memory" when vector similarity clears MEMORY_MERGE_SCORE or, when no
+# embeddings are available, token overlap clears MEMORY_MERGE_OVERLAP.
+MEMORY_MERGE_SCORE = 0.85
+MEMORY_MERGE_OVERLAP = 0.6
+_WORD_SPLIT = re.compile(r"[^a-z0-9']+", re.I)
+
+
+def normalize_label(label: str) -> str:
+    """Canonical form for memory labels so label drift ("Professional
+    focus" vs "professional focus") maps to ONE key instead of duplicates."""
+    return _WORD_SPLIT.sub(" ", str(label or "")).strip().lower()
+
+
+def merge_texts(existing: str, new: str) -> str:
+    """Combine two memory texts into one curated memory: existing lines kept
+    first, then any NEW lines that are not already present."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for line in str(existing or "").splitlines() + str(new or "").splitlines():
+        clean = line.strip()
+        if not clean or clean.lower() in seen:
+            continue
+        seen.add(clean.lower())
+        lines.append(clean)
+    return "\n".join(lines)
+
+
+def lexical_similarity(a: str, b: str) -> float:
+    """Jaccard overlap of normalized tokens — the no-embedding fallback for
+    same-fact detection."""
+    tokens_a = {t for t in _WORD_SPLIT.split(str(a).lower()) if t}
+    tokens_b = {t for t in _WORD_SPLIT.split(str(b).lower()) if t}
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
 
 class MemoryPlan(BaseModel):
     intent: str = Field(description="Short description of what the user wants.")
@@ -160,8 +197,45 @@ def _recorded_at(value: dict) -> str | None:
     return str(ts) if ts else None
 
 
+def _similar_existing(store: Any, user_id: str, mem_type: str, text: str) -> tuple[str, dict] | None:
+    """Find an existing memory that IS the same fact (vector sim or lexical
+    fallback). Returns its (key, value) so saves can iterate instead of
+    duplicating."""
+    if store is None:
+        return None
+    try:
+        results = store.search(namespace(user_id, mem_type), query=text, limit=8) or []
+    except Exception as exc:
+        logger.warning("Memory similarity search failed (%s: %s)", type(exc).__name__, exc)
+        return None
+    for item in results:
+        key = getattr(item, "key", None) or (item.get("key") if isinstance(item, dict) else None)
+        value = getattr(item, "value", None) or (item.get("value") if isinstance(item, dict) else {})
+        if not key or not isinstance(value, dict):
+            continue
+        if value.get("superseded_by_version_id") or value.get("superseded_by_snapshot"):
+            continue
+        if str(value.get("user_id") or "") != user_id:
+            continue
+        if str(value.get("type") or mem_type) != mem_type:
+            continue
+        score = getattr(item, "score", None)
+        if score is None and isinstance(item, dict):
+            score = item.get("score")
+        if score is not None:
+            if float(score) >= MEMORY_MERGE_SCORE:
+                return key, value
+            continue
+        if lexical_similarity(text, str(value.get("content") or "")) >= MEMORY_MERGE_OVERLAP:
+            return key, value
+    return None
+
+
 def save_memories(store: Any, user_id: str, memories: list[dict]) -> int:
-    """Persist typed memories; same (type,label) supersedes (overwrites) prior value."""
+    """Persist typed memories; same (type,label) supersedes (overwrites) prior
+    value, and a near-duplicate fact (same type, high similarity) is merged
+    INTO the existing memory instead of stored again — label drift converges
+    on one record rather than piling up copies."""
     if store is None:
         return 0
     saved = 0
@@ -172,7 +246,30 @@ def save_memories(store: Any, user_id: str, memories: list[dict]) -> int:
         text = str(item.get("text") or "").strip()
         if not text:
             continue
-        label = str(item.get("label") or f"{mem_type}_{hashlib.sha256(text.encode()).hexdigest()[:8]}").strip()
+        fallback_label = f"{mem_type}_{hashlib.sha256(text.encode()).hexdigest()[:8]}"
+        label = normalize_label(str(item.get("label") or fallback_label))
+        now = datetime.now(timezone.utc).isoformat()
+
+        peer = _similar_existing(store, user_id, mem_type, text)
+        if peer is not None:
+            peer_key, peer_value = peer
+            try:
+                merged_value = dict(peer_value)
+                merged_value.update(
+                    {
+                        "content": merge_texts(str(peer_value.get("content") or ""), text),
+                        # Keep the anchored label + earliest recorded_at; stamp
+                        # the iteration time so freshness is visible.
+                        "label": str(peer_value.get("label") or label),
+                        "updated_at": now,
+                    }
+                )
+                store.put(namespace(user_id, mem_type), peer_key, merged_value)
+                saved += 1
+            except Exception as exc:
+                logger.warning("Memory merge failed (%s: %s)", type(exc).__name__, exc)
+            continue
+
         key = hashlib.sha256(f"{mem_type}:{label}".encode()).hexdigest()[:16]
         try:
             store.put(
@@ -183,7 +280,8 @@ def save_memories(store: Any, user_id: str, memories: list[dict]) -> int:
                     "user_id": user_id,
                     "type": mem_type,
                     "label": label,
-                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "recorded_at": now,
+                    "updated_at": now,
                 },
             )
             saved += 1

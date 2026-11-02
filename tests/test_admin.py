@@ -963,6 +963,103 @@ def test_list_recent_runs_rejects_unknown_sort_field():
     assert response.status_code == 400
 
 
+class _MergeStore:
+    """Minimal store fake for merge tests: search returns pre-seeded items."""
+
+    def __init__(self, items=None):
+        self.items = items or []
+        self.puts = []
+        self.deletes = []
+
+    def search(self, namespace, query=None, limit=10, **kwargs):
+        return [i for i in self.items if i["key"] != query]
+
+    def put(self, namespace, key, value, index=None, **kwargs):
+        self.puts.append((key, value))
+
+    def delete(self, namespace, key):
+        self.deletes.append(key)
+
+
+def _merge_item(key, content, *, user_id="u1", mem_type="semantic", score=0.0, recorded_at=None):
+    return {
+        "key": key,
+        "value": {
+            "content": content,
+            "user_id": user_id,
+            "type": mem_type,
+            "label": f"label-{key}",
+            "recorded_at": recorded_at or "2026-10-01T00:00:00+00:00",
+        },
+        "score": score,
+    }
+
+
+def test_merge_duplicate_memories_groups_similar_and_prunes(monkeypatch):
+    # collection rows mirrored from list_memories: newest (updated_at) first,
+    # so the newest record is the merge anchor — two are near-duplicates
+    rows = [
+        {"key": "kB", "type": "semantic", "label": "b", "content": "Prefers Glean for internal search. Uses it daily.", "recorded_at": None, "updated_at": "2026-11-01T11:00:00"},
+        {"key": "kA", "type": "semantic", "label": "a", "content": "Prefers Glean for internal search.", "recorded_at": None, "updated_at": "2026-11-01T10:00:00"},
+        {"key": "kC", "type": "semantic", "label": "c", "content": "Likes dark mode.", "recorded_at": None, "updated_at": "2026-11-01T09:00:00"},
+    ]
+    monkeypatch.setattr(admin, "list_memories", lambda user_id, mem_type=None, **kw: rows)
+    store = _MergeStore(
+        [
+            _merge_item("kA", "Prefers Glean for internal search.", score=0.91),
+            _merge_item("kB", "Prefers Glean for internal search. Uses it daily.", score=0.95),
+            _merge_item("kC", "Likes dark mode.", score=0.4),
+        ]
+    )
+    result = admin.merge_duplicate_memories("u1", mem_type="semantic", store=store)
+    assert result["merged"] == 1
+    assert result["removed"] == 1
+    assert result["scanned"] == 3
+    # the newer record (kB) is the anchor; merged content + pruned sibling
+    merged_key, merged_value = store.puts[0]
+    assert merged_key == "kB"
+    assert "Uses it daily" in merged_value["content"]
+    assert "Glean" in merged_value["content"]
+    assert store.deletes == ["kA"]
+    assert "kC" not in store.deletes
+
+
+def test_merge_duplicate_memories_uses_lexical_fallback_without_embeddings(monkeypatch):
+    rows = [
+        {"key": "x1", "type": "procedural", "label": "pref", "content": "Research answers based on high-trust sources.", "recorded_at": None, "updated_at": "2026-11-01T10:00:00"},
+        {"key": "x2", "type": "procedural", "label": "pref2", "content": "Research answers based on high-trust sources primarily.", "recorded_at": None, "updated_at": "2026-11-01T11:00:00"},
+    ]
+    monkeypatch.setattr(admin, "list_memories", lambda user_id, mem_type=None, **kw: rows)
+    store = _MergeStore([_merge_item("x1", "Research answers based on high-trust sources.", mem_type="procedural"),
+                         _merge_item("x2", "Research answers based on high-trust sources primarily.", mem_type="procedural")])
+    # store search reports no similarity (no embeddings): lexical overlap must catch it
+    for item in store.items:
+        item["score"] = None
+    result = admin.merge_duplicate_memories("u1", mem_type="procedural", store=store)
+    assert result["merged"] == 1
+    assert result["removed"] == 1
+
+
+def test_merge_duplicates_endpoint_delegates_to_service(monkeypatch):
+    monkeypatch.setattr(
+        admin,
+        "merge_duplicate_memories",
+        lambda user_id, mem_type=None, **kw: {
+            "scanned": 3,
+            "merged": 2,
+            "removed": 2,
+        },
+    )
+    response = _client.post(
+        "/api/admin/memories/merge-duplicates",
+        json={"user_id": "u1"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["merged"] == 2
+    assert body["removed"] == 2
+
+
 def test_memory_types_describe_all_four():
     response = _client.get("/api/admin/memory-types")
     assert response.status_code == 200

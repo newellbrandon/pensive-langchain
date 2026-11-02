@@ -247,6 +247,39 @@ async function updateMemory(type, key, content) {
 document.getElementById("user-id").addEventListener("change", loadMemories);
 document.getElementById("refresh-memories").addEventListener("click", loadMemories);
 
+/* ---------- memory cleanup: merge duplicates ---------- */
+
+document.getElementById("merge-memories").addEventListener("click", async () => {
+  const user_id = document.getElementById("user-id").value.trim() || "default";
+  if (
+    !confirm(
+      "Merge semantically similar memories into one complete curated memory each? " +
+        "The newest copy becomes the anchor (contents combined), duplicate copies are deleted.",
+    )
+  ) {
+    return;
+  }
+  const button = document.getElementById("merge-memories");
+  button.disabled = true;
+  try {
+    const result = await api("/api/admin/memories/merge-duplicates", {
+      method: "POST",
+      body: JSON.stringify({ user_id }),
+    });
+    if (result.merged === 0) {
+      toast("No duplicate memories found — the store is already curated");
+    } else {
+      toast(`Merged ${result.merged} group(s) into curated memories; removed ${result.removed} duplicate(s)`);
+    }
+    loadMemories();
+    loadTypes();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 /* ---------- system prompt ---------- */
 
 async function loadPrompt() {

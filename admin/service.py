@@ -23,7 +23,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, safe_workspace_path, workspace_root
 from glean.client import get_glean_client
 from config import Config
-from memory.memories import MEMORY_TYPES, namespace
+from memory.memories import (
+    MEMORY_MERGE_OVERLAP,
+    MEMORY_MERGE_SCORE,
+    MEMORY_TYPES,
+    lexical_similarity,
+    merge_texts,
+    namespace,
+)
 from persistence.mongo import get_client, get_store
 
 logger = logging.getLogger(__name__)
@@ -222,6 +229,108 @@ def delete_memory(
     if exists:
         _resolve_store(store).delete(namespace(user_id, mem_type), key)
     return exists
+
+
+def _similar_memory_peers(
+    store: Any,
+    user_id: str,
+    mem_type: str,
+    anchor_key: str,
+    anchor_content: str,
+    rows: list[dict],
+    grouped: set,
+) -> list[dict]:
+    """Near-duplicate rows of the same memory (vector sim with lexical
+    fallback), excluding the anchor and already-grouped keys."""
+    try:
+        hits = store.search(namespace(user_id, mem_type), query=anchor_content, limit=8) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Memory merge search failed (%s: %s)", type(exc).__name__, exc
+        )
+        hits = []
+    peers: list[dict] = []
+    by_key = {r["key"]: r for r in rows}
+    for item in hits:
+        if isinstance(item, dict):
+            value = item.get("value") or {}
+            hit_key = item.get("key") or value.get("key")
+            score = item.get("score")
+        else:
+            value = getattr(item, "value", None) or {}
+            hit_key = getattr(item, "key", None) or value.get("key")
+            score = getattr(item, "score", None)
+        if not hit_key or hit_key == anchor_key or hit_key in grouped:
+            continue
+        if str(value.get("user_id") or "") != user_id:
+            continue
+        row = by_key.get(hit_key)
+        if row is None:
+            continue
+        if score is not None:
+            if float(score) < MEMORY_MERGE_SCORE:
+                continue
+        elif lexical_similarity(anchor_content, str(row.get("content") or "")) < MEMORY_MERGE_OVERLAP:
+            continue
+        peers.append(row)
+    return peers
+
+
+def merge_duplicate_memories(
+    user_id: str = DEFAULT_USER_ID,
+    mem_type: Optional[str] = None,
+    *,
+    collection: Collection | None = None,
+    store=None,
+) -> dict:
+    """Query all semantically similar memories together and curate each group
+    into ONE complete memory: the most recently updated record is the anchor
+    (its key, label, and newest position), the group's contents are merged
+    into it, and the duplicate copies are deleted. Returns scan/merge/removal
+    counts. Vector similarity with a lexical fallback when embeddings are
+    unavailable."""
+    store_resolved = _resolve_store(store)
+    types = [mem_type] if mem_type else list(MEMORY_TYPES)
+    scanned = 0
+    merged = 0
+    removed = 0
+    for mem_type_current in types:
+        rows = list_memories(user_id, mem_type_current, collection=collection)
+        grouped: set = set()
+        for row in rows:  # newest-first: the anchor is the most recent record
+            scanned += 1
+            key = row["key"]
+            if key in grouped:
+                continue
+            grouped.add(key)
+            peers = _similar_memory_peers(
+                store_resolved, user_id, mem_type_current, key, row["content"], rows, grouped
+            )
+            if not peers:
+                continue
+            merged += 1
+            content = row["content"]
+            recorded_at = row.get("recorded_at")
+            for peer in peers:
+                content = merge_texts(content, peer["content"])
+                recorded_at = recorded_at or peer.get("recorded_at")
+                grouped.add(peer["key"])
+                removed += 1
+            store_resolved.put(
+                namespace(user_id, mem_type_current),
+                key,
+                {
+                    "content": content,
+                    "user_id": user_id,
+                    "type": mem_type_current,
+                    "label": row.get("label") or mem_type_current,
+                    "recorded_at": recorded_at,
+                    "updated_at": _now(),
+                },
+            )
+            for peer in peers:
+                store_resolved.delete(namespace(user_id, mem_type_current), peer["key"])
+    return {"scanned": scanned, "merged": merged, "removed": removed}
 
 
 # --- test agents -------------------------------------------------------------
