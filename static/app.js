@@ -334,13 +334,42 @@ async function loadAgents() {
 
 /* ---------- recent executions (global feed: lab agents + subagents) ---------- */
 
+const runsFeed = { executor: null, sortBy: "created_at", order: "desc" };
+
+function syncRunsChips() {
+  document.querySelectorAll("#runs-executor-chips .chip").forEach((c) => {
+    c.classList.toggle("active", (c.dataset.executor || null) === runsFeed.executor);
+  });
+  document.querySelectorAll("#runs-sort-chips .chip").forEach((c) => {
+    c.classList.toggle("active", c.dataset.sort === `${runsFeed.sortBy}:${runsFeed.order}`);
+  });
+}
+
+document.getElementById("runs-executor-chips").addEventListener("click", (event) => {
+  const chip = event.target.closest(".chip");
+  if (!chip) return;
+  runsFeed.executor = chip.dataset.executor || null;
+  syncRunsChips();
+  loadRecentRuns();
+});
+
+document.getElementById("runs-sort-chips").addEventListener("click", (event) => {
+  const chip = event.target.closest(".chip");
+  if (!chip) return;
+  const [sortBy, order] = chip.dataset.sort.split(":");
+  runsFeed.sortBy = sortBy;
+  runsFeed.order = order;
+  syncRunsChips();
+  loadRecentRuns();
+});
+
 async function loadRecentRuns() {
   const box = document.getElementById("recent-runs");
   if (!box) return;
-  const sortSel = document.getElementById("runs-sort");
-  const [sortBy, order] = (sortSel ? sortSel.value : "created_at:desc").split(":");
   try {
-    const data = await api(`/api/admin/runs?limit=25&sort_by=${encodeURIComponent(sortBy)}&order=${order}`);
+    const params = new URLSearchParams({ limit: "25", sort_by: runsFeed.sortBy, order: runsFeed.order });
+    if (runsFeed.executor) params.set("executor", runsFeed.executor);
+    const data = await api(`/api/admin/runs?${params.toString()}`);
     const runs = data.runs || [];
     box.innerHTML = "";
     if (!runs.length) {
@@ -354,8 +383,6 @@ async function loadRecentRuns() {
     box.innerHTML = `<div class="empty">Could not load executions: ${esc(error.message)}</div>`;
   }
 }
-
-document.getElementById("runs-sort")?.addEventListener("change", loadRecentRuns);
 
 function fmtTokens(n) {
   const v = Number(n) || 0;

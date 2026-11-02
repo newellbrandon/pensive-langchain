@@ -176,14 +176,18 @@ async def list_recent_runs(
     limit: int = 25,
     sort_by: str = "created_at",
     order: str = "desc",
+    executor: Optional[str] = None,
 ) -> dict:
     """Global workflow feed: latest runs across lab agents AND spawned
     subagents (``sub-*``). Sortable by ``created_at`` or efficiency metrics
     (``tokens_total``, ``duration_ms``, …) to hunt for low-token,
-    high-performing agents worth promoting into reusable tools."""
+    high-performing agents worth promoting into reusable tools; filter to
+    ``executor=pensive|test`` for who ran the workflow."""
     limit = max(1, min(int(limit), 100))
     try:
-        runs = admin.list_recent_runs(limit=limit, sort_by=sort_by, order=order)
+        runs = admin.list_recent_runs(
+            limit=limit, sort_by=sort_by, order=order, executor=executor
+        )
     except ValueError as exc:
         raise _bad_request(exc)
     return {"runs": runs}

@@ -229,6 +229,15 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 .card-head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .card-head-row .card-title { margin: 0; }
 .card-head-row .field { margin: 0; }
+.chip-groups { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.chip-group { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip {
+  font-size: 11.5px; padding: 2px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--muted); cursor: pointer; line-height: 1.5;
+}
+.chip:hover { border-color: var(--border-strong); color: var(--green-2); }
+.chip.active { background: rgba(19, 170, 82, 0.16); border-color: var(--green-2); color: var(--green-2); font-weight: 600; }
 .agent-card .agent-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .agent-card .agent-name { font-weight: 600; }
 .agent-card .agent-meta { color: var(--muted); font-size: 12.5px; flex: 1; }
