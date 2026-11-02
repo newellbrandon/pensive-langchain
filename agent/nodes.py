@@ -371,7 +371,16 @@ async def _execute_spawn(call: dict, state: AgentState) -> str:
         logger.exception("subagent execution failed")
         return f"[error] subagent run failed: {type(exc).__name__}: {exc}"
     try:
-        admin.record_run(agent_id, task, result)
+        admin.record_run(
+            agent_id,
+            task,
+            result,
+            agent_def={
+                "name": subagent["name"],
+                "system_prompt": subagent["system_prompt"],
+                "tools": subagent["tools"],
+            },
+        )
     except Exception:
         logger.exception("could not record subagent run history")
 

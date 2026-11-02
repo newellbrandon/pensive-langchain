@@ -156,6 +156,14 @@ async def list_agent_runs(agent_id: str) -> dict:
     return {"agent_id": agent_id, "runs": admin.list_runs(agent_id)}
 
 
+@router.get("/runs")
+async def list_recent_runs(limit: int = 25) -> dict:
+    """Global execution feed: latest runs across lab agents AND spawned
+    subagents (``sub-*``), so delegated work shows up in the console."""
+    limit = max(1, min(int(limit), 100))
+    return {"runs": admin.list_recent_runs(limit=limit)}
+
+
 @router.get("/agents/{agent_id}/workspace")
 async def agent_workspace(agent_id: str) -> dict:
     return {"agent_id": agent_id, "files": admin.list_workspace_files(agent_id)}
