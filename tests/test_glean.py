@@ -243,20 +243,81 @@ class GleanClientTest(unittest.TestCase):
         # snapshot served without a new connection
         self.assertEqual(client.tool_schemas()[0]["function"]["name"], "glean_search")
 
+    def test_call_tool_strips_empty_and_hidden_args(self):
+        session = FakeMCPSession(
+            tools=[{"name": "search", "description": "Search Glean", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}],
+            call_results={"search": {"content": [{"type": "text", "text": "hit"}]}},
+        )
+        client = self.make_client(session=session)
+        _run(client.list_tools())
+        _run(client.call_tool("glean_search", {"query": "x", "after": "", "owner": None, "type": "pull", "_user_goal": "z"}))
+        self.assertEqual(self.session.calls[0][0], "search")
+        # empty params, the hidden metadata filters, and the agent-convention
+        # _user_goal must never reach the server
+        self.assertEqual(self.session.calls[0][1], {"query": "x"})
+
+    def test_search_schema_advertises_safe_whitelist_only(self):
+        full_schema = {
+            "type": "object",
+            "required": ["query", "_user_goal"],
+            "properties": {
+                "query": {"type": "string"},
+                "num_results": {"type": "integer"},
+                "after": {"type": "string"},
+                "before": {"type": "string"},
+                "app": {"type": "string"},
+                "owner": {"type": "string"},
+                "sort_by_recency": {"type": "boolean"},
+                "_user_goal": {"type": "string"},
+                "type": {"type": "string", "enum": ["pull", "spreadsheet"]},
+                "channel": {"type": "string"},
+                "from": {"type": "string"},
+                "cursor": {"type": "string"},
+                "container_filter": {"type": "string"},
+                "dynamic_search_result_filters": {"type": "string"},
+                "updated": {"type": "string"},
+            },
+        }
+        session = FakeMCPSession(
+            tools=[{"name": "search", "description": "Search Glean", "inputSchema": full_schema}]
+        )
+        client = self.make_client(session=session)
+        _run(client.list_tools())
+        params = client.tool_schemas()[0]["function"]["parameters"]
+        exposed = set(params["properties"].keys())
+        # the poisonable filters (type, channel, from, cursor, ...) and the
+        # agent-convention _user_goal must NOT reach the model
+        self.assertEqual(exposed, {"query", "num_results", "after", "before", "app", "owner", "sort_by_recency"})
+        self.assertEqual(params["required"], ["query"])
+        # whitelisted params keep their types so the model still gets hints
+        self.assertEqual(params["properties"]["num_results"]["type"], "integer")
+
+    def test_call_tool_restricts_search_to_whitelist(self):
+        # a hidden param that somehow still arrives (stale conversation
+        # replay) must be dropped for glean_search even when non-empty
+        session = FakeMCPSession(
+            tools=[{"name": "search", "description": "d", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}],
+            call_results={"search": {"content": [{"type": "text", "text": "hit"}]}},
+        )
+        client = self.make_client(session=session)
+        _run(client.list_tools())
+        _run(client.call_tool("glean_search", {"query": "x", "type": "pull", "from": "someone"}))
+        self.assertEqual(self.session.calls[0][1], {"query": "x"})
+
     def test_list_tools_reads_snake_case_input_schema(self):
         # The mcp SDK exposes the schema as Tool.input_schema; reading the
         # camelCase alias yields nothing and collapses parameters to {} —
         # which is exactly why the model called glean_search with no query.
         class _SdkTool:
-            name = "search"
-            description = "Search Glean"
+            name = "chat"
+            description = "Ask Glean's synthesized answer"
             input_schema = {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query"},
+                    "prompt": {"type": "string", "description": "Question"},
                     "count": {"type": "integer"},
                 },
-                "required": ["query"],
+                "required": ["prompt"],
             }
 
         session = FakeMCPSession(tools=[_SdkTool()])
@@ -264,9 +325,9 @@ class GleanClientTest(unittest.TestCase):
         _run(client.list_tools())
         params = client.tool_schemas()[0]["function"]["parameters"]
         self.assertEqual(
-            sorted(params["properties"].keys()), ["count", "query"]
+            sorted(params["properties"].keys()), ["count", "prompt"]
         )
-        self.assertEqual(params["required"], ["query"])
+        self.assertEqual(params["required"], ["prompt"])
 
     def test_call_tool_returns_ok_formatted_result(self):
         client = self.make_client(
