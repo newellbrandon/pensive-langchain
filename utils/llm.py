@@ -15,10 +15,16 @@ from config import Config
 
 @dataclass
 class GenerationResult:
-    """Result of a Responses API completion: answer text + tool calls."""
+    """Result of a Responses API completion: answer text + tool calls.
+
+    ``tokens_*`` carry the upstream usage report (0 when the gateway omits it)
+    so runs can be ranked by token efficiency.
+    """
 
     text: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 class ResponsesClient:
@@ -201,9 +207,12 @@ class ResponsesClient:
                 ) from None
             data = response.json()
 
+        usage = data.get("usage") or {}
         return GenerationResult(
             text=self._extract_answer(data),
             tool_calls=self._extract_tool_calls(data),
+            tokens_in=int(usage.get("input_tokens") or 0),
+            tokens_out=int(usage.get("output_tokens") or 0),
         )
 
     async def agenerate(self, messages: List[BaseMessage]) -> str:

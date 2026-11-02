@@ -139,6 +139,8 @@ async def generate_response(state: AgentState) -> dict:
 
     content = ""
     tool_calls: list[dict] = []
+    tokens_in = 0
+    tokens_out = 0
     for _ in range(_SERVER_ITERATION_LIMIT):
         try:
             result = await client.acomplete(
@@ -159,8 +161,12 @@ async def generate_response(state: AgentState) -> dict:
                 content,
                 [],
                 [{"step": "generate_response", "decision": "respond", "reason": reason}],
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
             )
 
+        tokens_in += getattr(result, "tokens_in", 0)
+        tokens_out += getattr(result, "tokens_out", 0)
         content = result.text
         tool_calls = result.tool_calls or []
         server_calls = [c for c in tool_calls if _is_server_call(c)]
@@ -217,7 +223,7 @@ async def generate_response(state: AgentState) -> dict:
         "decision": "tool_calls" if tool_calls else "respond",
         "reason": reason,
     }
-    return _generate_result(content, relay_calls, [decision])
+    return _generate_result(content, relay_calls, [decision], tokens_in=tokens_in, tokens_out=tokens_out)
 
 
 def _call_name(call: dict) -> str:
@@ -419,7 +425,14 @@ def _to_langchain_tool_call(call: dict) -> dict:
     }
 
 
-def _generate_result(content: str, tool_calls: list[dict], decisions: list[dict]) -> dict:
+def _generate_result(
+    content: str,
+    tool_calls: list[dict],
+    decisions: list[dict],
+    *,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+) -> dict:
     """Build the generate node's return value."""
     assistant_message = AIMessage(content=content)
     if tool_calls:
@@ -439,6 +452,8 @@ def _generate_result(content: str, tool_calls: list[dict], decisions: list[dict]
         "tool_calls": tool_calls,
         "messages": [assistant_message],
         "decisions": decisions,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
     }
 
 

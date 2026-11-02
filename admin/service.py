@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -337,6 +338,17 @@ def _public_run(doc: dict) -> dict:
         "executor": doc.get("executor") or (
             "pensive" if str(doc.get("agent_id") or "").startswith("sub-") else "test"
         ),
+        # Efficiency metrics (None on legacy runs so the UI can hide them).
+        "tokens_in": doc.get("tokens_in"),
+        "tokens_out": doc.get("tokens_out"),
+        "tokens_total": (
+            int(doc.get("tokens_in") or 0) + int(doc.get("tokens_out") or 0)
+        )
+        if doc.get("tokens_in") is not None or doc.get("tokens_out") is not None
+        else 0,
+        "duration_ms": doc.get("duration_ms"),
+        "tool_call_count": doc.get("tool_call_count"),
+        "step_count": doc.get("step_count"),
         # Definition of the agent that ran (name/system prompt/tools) when it
         # was an ephemeral subagent — lets the console promote it to a
         # reusable specialist agent.
@@ -374,6 +386,11 @@ def record_run(
         "status": "completed",
         "created_at": _now(),
         "executor": str(executor or "")[:16] or None,
+        "tokens_in": _positive_int(result.get("tokens_in")),
+        "tokens_out": _positive_int(result.get("tokens_out")),
+        "duration_ms": _positive_int(result.get("duration_ms")),
+        "tool_call_count": _positive_int(result.get("tool_call_count")),
+        "step_count": _positive_int(result.get("step_count")),
     }
     if agent_def and isinstance(agent_def, dict):
         tools = [t for t in agent_def.get("tools") or [] if isinstance(t, dict)][:12]
@@ -425,16 +442,54 @@ def list_runs(
     return [_public_run(d) for d in docs[:limit]]
 
 
+def _positive_int(value) -> int:
+    """Coerce a metric to a non-negative int (0 when missing/invalid)."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def list_recent_runs(
     limit: int = 25,
     *,
+    sort_by: str = "created_at",
+    order: str = "desc",
     collection: Collection | None = None,
 ) -> list[dict]:
     """Most recent runs across ALL agents (lab agents and ephemeral spawned
-    ``sub-*`` subagents), newest first — the console's global execution feed."""
-    docs = _runs_collection(collection).find({})
-    docs = sorted(docs, key=lambda d: d.get("created_at") or "", reverse=True)
-    return [_public_run(d) for d in docs[:limit]]
+    ``sub-*`` subagents) — the console's global workflow feed.
+
+    ``sort_by`` is a whitelisted field (``created_at`` or an efficiency
+    metric: ``tokens_in``, ``tokens_out``, ``tokens_total``, ``duration_ms``,
+    ``tool_call_count``, ``step_count``); ``order`` is ``asc`` or ``desc``
+    (default: newest first).
+    """
+    if sort_by not in RUN_SORT_FIELDS:
+        raise ValueError(f"unknown sort field: {sort_by}")
+    descending = order != "asc"
+    runs = [
+        _public_run(d)
+        for d in _runs_collection(collection).find({})
+    ]
+    runs.sort(
+        key=lambda run: run.get(sort_by) if sort_by == "created_at" else int(run.get(sort_by) or 0),
+        reverse=descending,
+    )
+    return runs[:limit]
+
+
+RUN_SORT_FIELDS = frozenset(
+    {
+        "created_at",
+        "tokens_in",
+        "tokens_out",
+        "tokens_total",
+        "duration_ms",
+        "tool_call_count",
+        "step_count",
+    }
+)
 
 
 # --- workspace browsing ------------------------------------------------------
@@ -529,8 +584,9 @@ async def _invoke_agent_step(
     transcript: list,
     task: str,
     tools: list | None = None,
-) -> tuple[str, list[dict], list[dict]]:
-    """Run the graph once for the agent; returns (answer, tool_calls, decisions)."""
+) -> tuple[str, list[dict], list[dict], int, int]:
+    """Run the graph once for the agent; returns
+    (answer, tool_calls, decisions, tokens_in, tokens_out)."""
     input_state: dict = {
         "messages": [HumanMessage(content=task)],
         "prompt_messages": list(transcript),
@@ -576,6 +632,8 @@ async def _invoke_agent_step(
         final_state.get("response") or "",
         final_state.get("tool_calls") or [],
         decisions,
+        int(final_state.get("tokens_in") or 0),
+        int(final_state.get("tokens_out") or 0),
     )
 
 
@@ -627,6 +685,9 @@ async def run_agent(
     steps: list[dict] = []
     answer = ""
     tool_calls: list[dict] = []
+    tokens_in_total = 0
+    tokens_out_total = 0
+    started = time.monotonic()
 
     for _ in range(max_steps + 1):
         # Transient upstream failures surface as a "Sorry..." answer from the
@@ -636,9 +697,13 @@ async def run_agent(
         # and never pollute the conversation the model sees.
         retries = 0
         while True:
-            answer, tool_calls, decisions = await _invoke_agent_step(
-                graph, agent, user_id, thread_id, transcript, task, tools=agent_tools
+            answer, tool_calls, decisions, step_tokens_in, step_tokens_out = (
+                await _invoke_agent_step(
+                    graph, agent, user_id, thread_id, transcript, task, tools=agent_tools
+                )
             )
+            tokens_in_total += step_tokens_in
+            tokens_out_total += step_tokens_out
             decisions_all.extend(decisions)
             needs_retry = (tool_calls and _all_unparseable_arguments(tool_calls)) or (
                 not tool_calls and _is_failure_answer(answer)
@@ -692,4 +757,13 @@ async def run_agent(
         "tool_calls": executed_calls,
         "steps": steps,
         "workspace": str(workspace),
+        # Efficiency metrics: tokens consumed (summed across every LLM
+        # round-trip, retries included), wall-clock duration, and activity
+        # counts — so the workflows list can rank agents by token economy.
+        "tokens_in": tokens_in_total,
+        "tokens_out": tokens_out_total,
+        "token_total": tokens_in_total + tokens_out_total,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "tool_call_count": len(executed_calls),
+        "step_count": len(steps),
     }

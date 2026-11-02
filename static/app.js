@@ -300,8 +300,10 @@ async function loadAgents() {
 async function loadRecentRuns() {
   const box = document.getElementById("recent-runs");
   if (!box) return;
+  const sortSel = document.getElementById("runs-sort");
+  const [sortBy, order] = (sortSel ? sortSel.value : "created_at:desc").split(":");
   try {
-    const data = await api("/api/admin/runs?limit=25");
+    const data = await api(`/api/admin/runs?limit=25&sort_by=${encodeURIComponent(sortBy)}&order=${order}`);
     const runs = data.runs || [];
     box.innerHTML = "";
     if (!runs.length) {
@@ -316,6 +318,21 @@ async function loadRecentRuns() {
   }
 }
 
+document.getElementById("runs-sort")?.addEventListener("change", loadRecentRuns);
+
+function fmtTokens(n) {
+  const v = Number(n) || 0;
+  if (v >= 1000000) return (v / 1000000).toFixed(1) + "M";
+  if (v >= 1000) return (v / 1000).toFixed(1) + "k";
+  return String(v);
+}
+
+function fmtDuration(ms) {
+  const v = Number(ms) || 0;
+  if (v < 1000) return v + "ms";
+  return (v / 1000).toFixed(1) + "s";
+}
+
 function recentRunItem(run) {
   const item = document.createElement("details");
   item.className = "run-item";
@@ -325,6 +342,14 @@ function recentRunItem(run) {
     ? (run.agent && run.agent.name ? `subagent ${esc(run.agent.name)}` : `subagent ${esc(run.agent_id)}`)
     : `agent ${esc(run.agent_id)}`;
   const taskPreview = run.task.length > 70 ? run.task.slice(0, 70) + "…" : run.task;
+  const hasTokens = run.tokens_in != null || run.tokens_out != null;
+  const metricChips = [];
+  if (hasTokens) metricChips.push(`${fmtTokens(run.tokens_total)} tok`);
+  if (run.tool_call_count != null) metricChips.push(`${run.tool_call_count} tool call(s)`);
+  if (run.duration_ms != null) metricChips.push(fmtDuration(run.duration_ms));
+  const metrics = metricChips.length
+    ? `<span class="run-metrics">${metricChips.map((m) => esc(m)).join(" · ")}</span>`
+    : "";
   const actions = [];
   if (isSubagent && run.agent && run.agent.name && run.agent.system_prompt && Array.isArray(run.agent.tools)) {
     actions.push(`<button class="btn small run-again" data-action="promote" data-run-id="${esc(run.run_id)}">Reuse as specialist agent</button>`);
@@ -337,6 +362,7 @@ function recentRunItem(run) {
       <span class="run-task">${esc(taskPreview)}</span>
       <span class="run-exec ${esc(executor)}">${esc(executor)}</span>
       <span class="run-when">${who} · ${fmtWhen(run.created_at)} · ${esc(run.status)}</span>
+      ${metrics}
       ${actions.join("")}
     </summary>
     <div class="run-detail">

@@ -226,6 +226,9 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 }
 .agent-list { display: flex; flex-direction: column; gap: 12px; }
 .agent-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.card-head-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.card-head-row .card-title { margin: 0; }
+.card-head-row .field { margin: 0; }
 .agent-card .agent-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .agent-card .agent-name { font-weight: 600; }
 .agent-card .agent-meta { color: var(--muted); font-size: 12.5px; flex: 1; }
@@ -259,6 +262,7 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 .run-item > summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
 .run-item .run-task { font-weight: 500; flex: 1; }
 .run-item .run-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.run-item .run-metrics { color: var(--border-strong); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .run-item .run-exec {
   font-size: 10.5px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.05em; padding: 1px 7px; border-radius: 999px;
