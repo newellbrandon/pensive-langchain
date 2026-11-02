@@ -266,10 +266,14 @@ document.getElementById("merge-memories").addEventListener("click", async () => 
       method: "POST",
       body: JSON.stringify({ user_id }),
     });
-    if (result.merged === 0) {
+    if (result.merged === 0 && result.polished === 0) {
       toast("No duplicate memories found — the store is already curated");
     } else {
-      toast(`Merged ${result.merged} group(s) into curated memories; removed ${result.removed} duplicate(s)`);
+      const bits = [];
+      if (result.merged) bits.push(`merged ${result.merged} group(s) into curated memories`);
+      if (result.removed) bits.push(`removed ${result.removed} duplicate(s)`);
+      if (result.polished) bits.push(`de-duplicated ${result.polished} concatenated memory(s)`);
+      toast(cap(bits.join("; ")));
     }
     loadMemories();
     loadTypes();

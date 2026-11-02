@@ -1011,15 +1011,30 @@ def test_merge_duplicate_memories_groups_similar_and_prunes(monkeypatch):
             _merge_item("kC", "Likes dark mode.", score=0.4),
         ]
     )
-    result = admin.merge_duplicate_memories("u1", mem_type="semantic", store=store)
+    polished = []
+
+    async def fake_consolidate(client, texts):
+        polished.append(texts)
+        collapsed = texts[0]
+        for fragment in texts[1:]:
+            collapsed = admin.merge_texts(collapsed, fragment)
+        return collapsed  # minimal polish: at least collapse duplicate lines
+
+    monkeypatch.setattr(admin, "consolidate_memories", fake_consolidate)
+    result = _run(admin.merge_duplicate_memories("u1", mem_type="semantic", store=store))
     assert result["merged"] == 1
     assert result["removed"] == 1
     assert result["scanned"] == 3
-    # the newer record (kB) is the anchor; merged content + pruned sibling
+    # the newer record (kB) is the anchor; pruned sibling
     merged_key, merged_value = store.puts[0]
     assert merged_key == "kB"
+    # near-identical lines were collapsed BEFORE polish: one complete line
+    assert merged_value["content"].count("\n") == 0
     assert "Uses it daily" in merged_value["content"]
     assert "Glean" in merged_value["content"]
+    # LLM polish ran on the group's fragments
+    assert len(polished) == 1
+    assert len(polished[0]) == 2
     assert store.deletes == ["kA"]
     assert "kC" not in store.deletes
 
@@ -1035,21 +1050,21 @@ def test_merge_duplicate_memories_uses_lexical_fallback_without_embeddings(monke
     # store search reports no similarity (no embeddings): lexical overlap must catch it
     for item in store.items:
         item["score"] = None
-    result = admin.merge_duplicate_memories("u1", mem_type="procedural", store=store)
+
+    async def fake_consolidate(client, texts):
+        return texts[0]  # full collapse: anchor ends up as the longest fragment
+
+    monkeypatch.setattr(admin, "consolidate_memories", fake_consolidate)
+    result = _run(admin.merge_duplicate_memories("u1", mem_type="procedural", store=store))
     assert result["merged"] == 1
     assert result["removed"] == 1
 
 
 def test_merge_duplicates_endpoint_delegates_to_service(monkeypatch):
-    monkeypatch.setattr(
-        admin,
-        "merge_duplicate_memories",
-        lambda user_id, mem_type=None, **kw: {
-            "scanned": 3,
-            "merged": 2,
-            "removed": 2,
-        },
-    )
+    async def fake_merge(user_id, mem_type=None, **kw):
+        return {"scanned": 3, "merged": 2, "removed": 2}
+
+    monkeypatch.setattr(admin, "merge_duplicate_memories", fake_merge)
     response = _client.post(
         "/api/admin/memories/merge-duplicates",
         json={"user_id": "u1"},
@@ -1058,6 +1073,66 @@ def test_merge_duplicates_endpoint_delegates_to_service(monkeypatch):
     body = response.json()
     assert body["merged"] == 2
     assert body["removed"] == 2
+
+
+def test_merge_self_heals_literal_concatenations(monkeypatch):
+    # a single record that is itself a literal merge of near-identical lines
+    rows = [
+        {
+            "key": "kZ", "type": "semantic", "label": "prefs",
+            "content": "Prefers Glean for internal search.\nPrefers Glean for internal search. Uses it daily.",
+            "recorded_at": None, "updated_at": "2026-11-01T11:00:00",
+        },
+    ]
+    monkeypatch.setattr(admin, "list_memories", lambda user_id, mem_type=None, **kw: rows)
+    store = _MergeStore([_merge_item("kZ", rows[0]["content"], score=0.5)])  # no peer passes the bar
+    polished = []
+
+    async def fake_consolidate(client, texts):
+        polished.append(texts)
+        collapsed = texts[0]
+        for fragment in texts[1:]:
+            collapsed = admin.merge_texts(collapsed, fragment)
+        return collapsed
+
+    monkeypatch.setattr(admin, "consolidate_memories", fake_consolidate)
+    result = _run(admin.merge_duplicate_memories("u1", mem_type="semantic", store=store))
+    assert result["merged"] == 0
+    assert result["removed"] == 0
+    assert result["polished"] == 1
+    # one complete line remains — the duplicate line item is gone
+    assert len(store.puts) == 1
+    assert store.puts[0][0] == "kZ"
+    assert store.puts[0][1]["content"].count("\n") == 0
+    assert "Uses it daily" in store.puts[0][1]["content"]
+    assert polished
+
+
+def test_merge_strips_empty_lines_and_consolidates_suspicious_rows(monkeypatch):
+    # two paraphrase-level lines (overlap >= 0.5 but neither is a superset)
+    rows = [
+        {
+            "key": "kP", "type": "semantic", "label": "vision",
+            "content": (
+                "The user's intended agentic-memory experience is: natural-language queries go in.\n"
+                "The user's target interaction model is natural-language queries as input.\n"
+            ),
+            "recorded_at": None, "updated_at": "2026-11-01T11:00:00",
+        },
+    ]
+    monkeypatch.setattr(admin, "list_memories", lambda user_id, mem_type=None, **kw: rows)
+    store = _MergeStore([_merge_item("kP", rows[0]["content"], score=0.5)])
+
+    async def fake_consolidate(client, texts):
+        return "The user's vision: natural-language queries go in and context-enriched results come out."
+
+    monkeypatch.setattr(admin, "consolidate_memories", fake_consolidate)
+    result = _run(admin.merge_duplicate_memories("u1", mem_type="semantic", store=store))
+    assert result["polished"] == 1
+    assert result["merged"] == 0
+    content = store.puts[0][1]["content"]
+    assert content.count("\n") == 0  # consolidated + trailing blank line stripped
+    assert "vision" in content
 
 
 def test_memory_types_describe_all_four():
