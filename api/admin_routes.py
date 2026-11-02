@@ -22,6 +22,11 @@ class MemoryUpdateRequest(BaseModel):
     content: str
 
 
+class MemoryMergeRequest(BaseModel):
+    user_id: str = "default"
+    mem_type: Optional[str] = None
+
+
 class SystemPromptRequest(BaseModel):
     text: str = ""
 
@@ -68,6 +73,16 @@ async def update_memory(
     except ValueError as exc:
         raise _bad_request(exc)
     return {"memory": record}
+
+
+@router.post("/memories/merge-duplicates")
+async def merge_duplicate_memories(body: MemoryMergeRequest) -> dict:
+    """Group semantically similar memories into one complete curated memory
+    each (newest record wins as anchor, contents merged, copies deleted)."""
+    try:
+        return admin.merge_duplicate_memories(body.user_id, body.mem_type)
+    except ValueError as exc:
+        raise _bad_request(exc)
 
 
 @router.delete("/memories/{mem_type}/{key}")

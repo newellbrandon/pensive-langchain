@@ -44,6 +44,11 @@ class FakeStore:
         self.data.setdefault(namespace, {})[key] = value
         self.calls.append({"op": "put", "namespace": namespace, "key": key, "value": value})
 
+    def delete(self, namespace, key):
+        self.calls.append({"op": "delete", "namespace": namespace, "key": key})
+        if self.data.get(namespace):
+            self.data[namespace].pop(key, None)
+
 
 class FakeClient:
     def __init__(self, result: str | Exception):
@@ -242,6 +247,76 @@ class SaveTest(unittest.TestCase):
         self.assertEqual(puts[0]["value"]["content"], "Trekking is hiking over 5 days")
         self.assertEqual(puts[0]["value"]["type"], "taxonomic")
         self.assertIn("recorded_at", puts[0]["value"])
+
+    def test_save_updates_near_duplicate_instead_of_new_key(self):
+        store = FakeStore(
+            {
+                ("users", "u1", "memories", "semantic"): [
+                    FakeSearchItem(
+                        "k1",
+                        {
+                            "content": "Brandon prefers Glean for internal search.",
+                            "user_id": "u1",
+                            "type": "semantic",
+                            "label": "search prefs",
+                            "recorded_at": "2026-10-01T00:00:00+00:00",
+                        },
+                        score=0.93,
+                    )
+                ]
+            }
+        )
+        saved = mem.save_memories(
+            store, "u1",
+            [{
+                "type": "semantic",
+                "text": "Brandon prefers Glean for internal search. He uses it daily.",
+                "label": "preferred search tool",
+            }],
+        )
+        self.assertEqual(saved, 1)
+        puts = [c for c in store.calls if c.get("op") == "put"]
+        # same record, not a new key: exact label drift converges onto one memory
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]["key"], "k1")
+        self.assertEqual(puts[0]["value"]["label"], "search prefs")
+        self.assertEqual(puts[0]["value"]["recorded_at"], "2026-10-01T00:00:00+00:00")
+        self.assertIn("He uses it daily", puts[0]["value"]["content"])
+        self.assertIn("updated_at", puts[0]["value"])
+
+    def test_save_keeps_new_key_without_near_duplicate(self):
+        store = FakeStore()
+        mem.save_memories(
+            store, "u1",
+            [{"type": "semantic", "text": "Likes dark mode.", "label": "Theme"}],
+        )
+        puts = [c for c in store.calls if c.get("op") == "put"]
+        self.assertEqual(len(puts), 1)
+
+    def test_save_normalizes_labels_before_keying(self):
+        store = FakeStore()
+        mem.save_memories(
+            store, "u1",
+            [{"type": "semantic", "text": "Professional focus.", "label": "Professional Focus"}],
+        )
+        mem.save_memories(
+            store, "u1",
+            [{"type": "semantic", "text": "Professional focus.", "label": "professional focus"}],
+        )
+        keys = {c["key"] for c in store.calls if c.get("op") == "put"}
+        self.assertEqual(len(keys), 1)
+
+    def test_merge_texts_combines_unique_lines(self):
+        self.assertEqual(mem.merge_texts("alpha", "alpha"), "alpha")
+        self.assertEqual(mem.merge_texts("alpha", "alpha\nbeta"), "alpha\nbeta")
+        self.assertEqual(mem.merge_texts("alpha\ngamma", "beta\nalpha"), "alpha\ngamma\nbeta")
+        self.assertEqual(mem.merge_texts("", "new"), "new")
+
+    def test_lexical_similarity_compares_token_overlap(self):
+        self.assertEqual(mem.lexical_similarity("a b c", "a b c"), 1.0)
+        self.assertEqual(mem.lexical_similarity("a b", "c d"), 0.0)
+        self.assertGreater(mem.lexical_similarity("prefers glean search daily", "prefers glean search sometimes"), 0.5)
+        self.assertLess(mem.lexical_similarity("prefers glean search daily", "prefers glean search sometimes"), 1.0)
 
 
 if __name__ == "__main__":
