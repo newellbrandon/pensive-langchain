@@ -27,12 +27,18 @@ services:
       - API_PORT=8000
       - PENSIVE_AGENT_WORKSPACES=/app/agent-workspaces
       - PENSIVE_PROJECTS_ROOT=/projects
+      - GLEAN_MCP_URL=${GLEAN_MCP_URL:-https://mongodb-be.glean.com/mcp/default}
+      - GLEAN_SCOPE=${GLEAN_SCOPE:-SEARCH DOCUMENTS ENTITIES MCP}
+      - GLEAN_REDIRECT_URI=${GLEAN_REDIRECT_URI:-http://localhost:8000/glean/callback}
+      - GLEAN_TOKEN_CACHE=/app/.glean-tokens.json
     volumes:
       # Agent lab workspaces live on the host so built apps survive container
       # recreations (path: ${PENSIVE_AGENT_WORKSPACES:-./agent-workspaces}).
       - ./agent-workspaces:/app/agent-workspaces
       # Host projects dir (including the OKF bundle) — READ-ONLY.
       - ${PROJECTS_HOST_DIR:-${HOME}/projects}:/projects:ro
+      # Glean OAuth token cache (one user's local dev credentials).
+      - ./.glean-tokens.json:/app/.glean-tokens.json
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

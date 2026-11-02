@@ -13,6 +13,7 @@ from langgraph.store.base import BaseStore
 
 from admin import service as admin
 from admin.executor import PROJECT_TOOL_NAMES, execute_project_tool_call
+from glean.client import TOOL_PREFIX, get_glean_client
 from agent.state import AgentState
 from memory import memories
 from utils.llm import get_responses_client
@@ -122,7 +123,15 @@ async def generate_response(state: AgentState) -> dict:
     prompt_messages.extend(transcript)
 
     client = get_responses_client()
-    tools = _server_tools(state.get("tools") or None, bool(state.get("offer_server_tools")))
+    offer_server = bool(state.get("offer_server_tools"))
+    if offer_server:
+        # Warm the Glean tool snapshot (cheap: once per minute; no-op when the
+        # deployment is not connected) so glean_* schemas reach the model.
+        try:
+            await get_glean_client().refresh_tools_if_stale()
+        except (Exception, BaseExceptionGroup):  # noqa: BLE001
+            logger.warning("Glean snapshot refresh failed before tool build", exc_info=True)
+    tools = _server_tools(state.get("tools") or None, offer_server)
     tool_choice = state.get("tool_choice")
     spawn_budget = _SPAWN_BUDGET
     server_budget = _SERVER_TOOL_BUDGET
@@ -154,8 +163,8 @@ async def generate_response(state: AgentState) -> dict:
 
         content = result.text
         tool_calls = result.tool_calls or []
-        server_calls = [c for c in tool_calls if _call_name(c) in SERVER_TOOL_NAMES]
-        relay_calls = [c for c in tool_calls if _call_name(c) not in SERVER_TOOL_NAMES]
+        server_calls = [c for c in tool_calls if _is_server_call(c)]
+        relay_calls = [c for c in tool_calls if not _is_server_call(c)]
         if not server_calls:
             break
 
@@ -216,9 +225,11 @@ def _call_name(call: dict) -> str:
 
 
 SPAWN_SUBAGENT_NAME = "spawn_subagent"
-_SERVER_ITERATION_LIMIT = 4
 _SPAWN_BUDGET = 2
 _SERVER_TOOL_BUDGET = 8
+# More LLM rounds than the server-tool budget, so a model that pages through
+# multiple tool results can actually finish; the budget still bounds total work.
+_SERVER_ITERATION_LIMIT = _SERVER_TOOL_BUDGET + 4
 _SPAWN_DIGEST_ANSWER_LIMIT = 4000
 _SPAWN_DIGEST_OUTPUT_LIMIT = 200
 
@@ -276,7 +287,18 @@ def _server_tools(client_tools: list[dict] | None, offer_server: bool) -> list[d
         name = (tool.get("function") or {}).get("name")
         if name not in defined:
             tools.append(tool)
+    # Glean tools (discovered MCP surface, prefixed glean_*) — only when the
+    # deployment is connected; failures surface as [error] results at call time.
+    for tool in get_glean_client().tool_schemas():
+        name = (tool.get("function") or {}).get("name")
+        if name and name not in defined:
+            tools.append(tool)
     return tools
+
+
+def _is_server_call(call: dict) -> bool:
+    name = _call_name(call)
+    return name in SERVER_TOOL_NAMES or name.startswith(TOOL_PREFIX)
 
 
 async def _execute_server_call(call: dict, state: AgentState) -> str:
@@ -284,6 +306,21 @@ async def _execute_server_call(call: dict, state: AgentState) -> str:
     name = _call_name(call)
     if name == SPAWN_SUBAGENT_NAME:
         return await _execute_spawn(call, state)
+    if name.startswith(TOOL_PREFIX):
+        try:
+            args = json.loads(call.get("arguments") or "{}")
+            if not isinstance(args, dict):
+                args = {}
+        except (ValueError, TypeError):
+            return (
+                "[error] glean tool arguments are not valid JSON; reissue the "
+                "call with valid JSON"
+            )
+        try:
+            await get_glean_client().refresh_tools_if_stale()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("glean refresh failed: %s", exc)
+        return (await get_glean_client().call_tool(name, args))["output"]
     executed = execute_project_tool_call(call)
     return executed["output"]
 

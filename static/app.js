@@ -69,6 +69,7 @@ document.getElementById("tabs").addEventListener("click", (event) => {
   if (button.dataset.tab === "memories") loadMemories();
   if (button.dataset.tab === "prompt") loadPrompt();
   if (button.dataset.tab === "agents") loadAgents();
+  if (button.dataset.tab === "glean") loadGlean();
 });
 
 /* ---------- memories ---------- */
@@ -592,6 +593,109 @@ document.getElementById("create-agent").addEventListener("click", async () => {
 });
 
 document.getElementById("cancel-edit").addEventListener("click", cancelEdit);
+
+/* ---------- glean ---------- */
+
+async function loadGlean() {
+  const box = document.getElementById("glean-status");
+  const connectBtn = document.getElementById("glean-connect");
+  const refreshBtn = document.getElementById("glean-refresh-token");
+  const disconnectBtn = document.getElementById("glean-disconnect");
+  try {
+    const s = await api("/api/admin/glean/status");
+    const expiry = s.expires_at ? new Date(s.expires_at * 1000).toLocaleString() : "—";
+    const toolLine = s.tool_count
+      ? `<p class="decisions">${s.tool_count} tool(s): <code>${esc(s.tools.join("</code>, <code>"))}</code></p>`
+      : "";
+    box.innerHTML = `
+      <p class="decisions">
+        status: <strong>${s.connected ? "connected" : "not connected"}</strong>
+        ${s.connected ? `· token expires ${esc(expiry)}` : ""}
+        · ${esc(s.mcp_url)}
+      </p>
+      ${toolLine}
+    `;
+    connectBtn.hidden = s.connected;
+    refreshBtn.hidden = !s.connected;
+    disconnectBtn.hidden = !s.connected;
+  } catch (error) {
+    box.innerHTML = `<p class="decisions" style="color:var(--danger)">${esc(error.message)}</p>`;
+  }
+}
+
+document.getElementById("glean-connect").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/admin/glean/auth", { method: "POST" });
+    if (data.auth_url) {
+      toast("Opening Glean authorization…");
+      window.open(data.auth_url, "_blank", "noopener");
+    } else {
+      toast("Already connected — refresh status");
+    }
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+document.getElementById("glean-refresh-token").addEventListener("click", async () => {
+  try {
+    await api("/api/admin/glean/refresh", { method: "POST" });
+    toast("Glean token refreshed");
+    loadGlean();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+document.getElementById("glean-disconnect").addEventListener("click", async () => {
+  if (!confirm("Disconnect Glean? The cached token will be deleted.")) return;
+  try {
+    await api("/api/admin/glean/disconnect", { method: "POST" });
+    toast("Glean disconnected");
+    loadGlean();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+document.getElementById("glean-run").addEventListener("click", async () => {
+  const raw = document.getElementById("glean-query").value.trim();
+  if (!raw) {
+    toast("Enter a query first", true);
+    return;
+  }
+  let name = "glean_search";
+  let arguments_ = { query: raw };
+  const colon = raw.indexOf(":");
+  if (colon > 0 && !raw.slice(colon + 1).includes(":")) {
+    const prefix = raw.slice(0, colon).trim();
+    const rest = raw.slice(colon + 1).trim();
+    if (prefix.startsWith("glean_") || ["search", "chat", "read_document", "employee_search", "code_search"].includes(prefix)) {
+      name = prefix.startsWith("glean_") ? prefix : `glean_${prefix}`;
+      arguments_ = { query: rest, prompt: rest };
+    }
+  }
+  const resultBox = document.getElementById("glean-result");
+  resultBox.hidden = false;
+  resultBox.innerHTML = `<p class="decisions">Calling ${esc(name)}…</p>`;
+  try {
+    const result = await api("/api/admin/glean/tools/call", {
+      method: "POST",
+      body: JSON.stringify({ name, arguments: arguments_ }),
+    });
+    resultBox.innerHTML = `<p class="answer">${esc(result.output)}</p>`;
+  } catch (error) {
+    resultBox.innerHTML = `<p class="decisions" style="color:var(--danger)">${esc(error.message)}</p>`;
+  }
+});
+
+// The OAuth callback redirects back to /ui?glean=connected|error.
+if (new URLSearchParams(location.search).get("glean") === "connected") {
+  toast("Glean connected!");
+  loadGlean();
+} else if (new URLSearchParams(location.search).get("glean") === "error") {
+  toast("Glean authorization failed", true);
+}
 
 /* ---------- boot ---------- */
 

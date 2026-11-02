@@ -23,6 +23,7 @@
       <button class="tab active" data-tab="memories">Memories</button>
       <button class="tab" data-tab="prompt">System Prompt</button>
       <button class="tab" data-tab="agents">Agents</button>
+      <button class="tab" data-tab="glean">Glean</button>
     </nav>
     <a class="mongo-link" href="https://www.mongodb.com" target="_blank" rel="noopener">mongodb.com ↗</a>
   </header>
@@ -96,6 +97,31 @@
       </div>
 
       <div id="agent-list" class="agent-list"></div>
+    </section>
+
+    <!-- ============ GLEAN ============ -->
+    <section id="tab-glean" class="tab-panel">
+      <div class="panel-head">
+        <h1>Glean (enterprise search)</h1>
+        <p class="sub">Connect Pensive to the Glean MCP server so main-chat agents and subagents can search company knowledge (<code>glean_search</code>, <code>glean_chat</code>, <code>glean_read_document</code>, …).</p>
+      </div>
+      <div class="card">
+        <div id="glean-status" class="glean-status"><p class="decisions">Loading Glean status…</p></div>
+        <div class="card-actions">
+          <button id="glean-connect" class="btn primary">Connect with Glean</button>
+          <button id="glean-refresh-token" class="btn" hidden>Refresh token</button>
+          <button id="glean-disconnect" class="btn danger" hidden>Disconnect</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2 class="card-title">Smoke test</h2>
+        <div class="run-box">
+          <input id="glean-query" type="text" placeholder="e.g. search: MongoDB Atlas Stream Processing" />
+          <button id="glean-run" class="btn primary">Run Glean tool</button>
+        </div>
+        <p class="hint">Type <code>search: &lt;query&gt;</code> to call <code>glean_search</code>, <code>chat: &lt;question&gt;</code> for <code>glean_chat</code>, or <code>toolname: args-json</code>.</p>
+        <div id="glean-result" class="run-result" hidden></div>
+      </div>
     </section>
   </main>
 
