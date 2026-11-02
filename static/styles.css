@@ -266,12 +266,41 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 
 .agent-runs { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
 .agent-runs > summary { cursor: pointer; color: var(--green-2); font-size: 13px; font-weight: 600; }
-.runs-list { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.runs-list { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; --runs-cols: 86px minmax(0, 1.5fr) minmax(0, 1fr) 64px 84px 74px; }
+.runs-header {
+  display: grid;
+  grid-template-columns: var(--runs-cols);
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 .run-item { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
-.run-item > summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
-.run-item .run-task { font-weight: 500; flex: 1; }
-.run-item .run-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.run-item .run-metrics { color: var(--border-strong); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.run-item > summary {
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: var(--runs-cols);
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.run-item .run-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-item .run-name { font-weight: 600; display: flex; flex-direction: column; line-height: 1.3; }
+.run-item .run-id { color: var(--muted); font-size: 11px; font-weight: 400; }
+.run-item .run-when,
+.run-item .run-tokens,
+.run-item .run-calls,
+.run-item .run-duration {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.run-detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.run-task-line { font-weight: 600; margin: 0 0 8px; }
+.run-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .run-item .run-exec {
   font-size: 10.5px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.05em; padding: 1px 7px; border-radius: 999px;
@@ -280,7 +309,6 @@ textarea { resize: vertical; width: 100%; font-family: var(--mono); font-size: 1
 .run-item .run-exec.pensive { background: rgba(19, 170, 82, 0.16); color: var(--green-2); }
 .run-item .run-exec.test { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
 .run-item .run-again { flex-shrink: 0; }
-.run-detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .run-detail .answer { white-space: pre-wrap; font-size: 13px; margin: 0 0 8px; }
 .run-tools summary { cursor: pointer; color: var(--green-2); font-size: 12.5px; }
 .run-step { margin-top: 6px; background: var(--canvas); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
