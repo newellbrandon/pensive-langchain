@@ -380,6 +380,7 @@ async def _execute_spawn(call: dict, state: AgentState) -> str:
                 "system_prompt": subagent["system_prompt"],
                 "tools": subagent["tools"],
             },
+            executor="pensive",
         )
     except Exception:
         logger.exception("could not record subagent run history")

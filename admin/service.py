@@ -325,6 +325,12 @@ def _public_run(doc: dict) -> dict:
         "workspace": doc.get("workspace") or "",
         "status": doc.get("status") or "",
         "created_at": doc.get("created_at"),
+        # Who executed the workflow: "pensive" (subagent spawned from a main
+        # chat) or "test" (console lab-agent run). Legacy runs fall back to
+        # the sub- agent-id prefix convention.
+        "executor": doc.get("executor") or (
+            "pensive" if str(doc.get("agent_id") or "").startswith("sub-") else "test"
+        ),
         # Definition of the agent that ran (name/system prompt/tools) when it
         # was an ephemeral subagent — lets the console promote it to a
         # reusable specialist agent.
@@ -338,6 +344,7 @@ def record_run(
     result: dict,
     *,
     agent_def: Optional[dict] = None,
+    executor: Optional[str] = None,
     collection: Collection | None = None,
 ) -> dict:
     """Persist a completed agent run so past work can be reviewed and re-run.
@@ -346,6 +353,8 @@ def record_run(
     already truncated by the executor) so history stays light. ``agent_def``
     captures the ephemeral agent's definition (name / system prompt / tools)
     so a useful subagent can later be promoted to a reusable lab agent.
+    ``executor`` tags who ran it: "pensive" (spawned from a chat) or "test"
+    (console lab-agent run).
     """
     doc = {
         "_id": uuid.uuid4().hex[:12],
@@ -358,6 +367,7 @@ def record_run(
         "workspace": str(result.get("workspace") or ""),
         "status": "completed",
         "created_at": _now(),
+        "executor": str(executor or "")[:16] or None,
     }
     if agent_def and isinstance(agent_def, dict):
         tools = [t for t in agent_def.get("tools") or [] if isinstance(t, dict)][:12]

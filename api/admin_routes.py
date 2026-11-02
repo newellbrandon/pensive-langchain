@@ -144,7 +144,7 @@ async def run_agent(agent_id: str, body: AgentRunRequest, request: Request) -> d
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     try:
-        record = admin.record_run(agent_id, body.task, result)
+        record = admin.record_run(agent_id, body.task, result, executor="test")
         result = dict(result, run_id=record["run_id"])
     except Exception:  # noqa: BLE001 — history is best-effort, never fails the run
         logger.exception("Could not record agent run history")

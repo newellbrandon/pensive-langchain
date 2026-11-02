@@ -102,8 +102,8 @@ class SpawnSubagentTest(unittest.TestCase):
         # record_run would hit the real Mongo connection on the host — stub it.
         self.record_patcher = mock.patch(
             "agent.nodes.admin.record_run",
-            side_effect=lambda agent_id, task, result, agent_def=None: self.recorded_runs.append(
-                (agent_id, task, agent_def)
+            side_effect=lambda agent_id, task, result, agent_def=None, executor=None: self.recorded_runs.append(
+                (agent_id, task, agent_def, executor)
             ),
         )
         self.record_patcher.start()
@@ -269,6 +269,8 @@ class SpawnSubagentTest(unittest.TestCase):
         self.assertTrue(agent_def["name"])
         self.assertTrue(agent_def["system_prompt"])
         self.assertEqual(agent_def["tools"], admin.DEFAULT_AGENT_TOOLS)
+        # ... tagged as a "pensive"-executed workflow (vs "test" console runs)
+        self.assertEqual(self.recorded_runs[0][3], "pensive")
 
     def test_spawn_budget_caps_at_two(self):
         graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})

@@ -324,6 +324,30 @@ class AgentHistoryTest(unittest.TestCase):
         self.assertEqual(recent[0]["agent"]["name"], "coral-scribe-3621")
         self.assertEqual(len(recent[0]["agent"]["tools"]), 2)
 
+    def test_record_run_tags_executor_and_derives_for_legacy_runs(self):
+        run = admin.record_run(
+            "sub-abc123",
+            "search glean",
+            {"answer": "digest", "decisions": [], "tool_calls": [], "workspace": "/w"},
+            executor="pensive",
+            collection=self.coll,
+        )
+        self.assertEqual(run["executor"], "pensive")
+        # legacy docs (recorded before the tag existed) fall back to the
+        # sub- prefix convention for spawned subagents
+        legacy_spawn = {
+            "_id": "old1", "agent_id": "sub-zzz", "task": "old spawn",
+            "answer": "", "decisions": [], "tool_calls": [], "steps": [],
+            "workspace": "", "status": "completed", "created_at": "2026-11-01T00:00:01+00:00",
+        }
+        legacy_lab = dict(legacy_spawn, _id="old2", agent_id="ag_9",
+                          created_at="2026-11-01T00:00:02+00:00")
+        self.coll.docs.extend([legacy_spawn, legacy_lab])
+        by_id = {r["run_id"]: r for r in admin.list_recent_runs(collection=self.coll)}
+        self.assertEqual(by_id["old1"]["executor"], "pensive")
+        self.assertEqual(by_id["old2"]["executor"], "test")
+        self.assertEqual(by_id[run["run_id"]]["executor"], "pensive")
+
     def test_record_run_keeps_step_history(self):
         steps = [
             {
@@ -919,8 +943,8 @@ def test_agent_run_records_history(monkeypatch):
     async def fake_run(agent, task, graph):
         return {"answer": "done", "decisions": [], "tool_calls": [], "workspace": "/w"}
 
-    def fake_record(agent_id, task, result):
-        calls["recorded"] = (agent_id, task, result)
+    def fake_record(agent_id, task, result, executor=None):
+        calls["recorded"] = (agent_id, task, result, executor)
         return {"run_id": "r1"}
 
     monkeypatch.setattr(admin, "run_agent", fake_run)
@@ -928,8 +952,10 @@ def test_agent_run_records_history(monkeypatch):
     response = _client.post("/api/admin/agents/ag_1/run", json={"task": "do it"})
     assert response.status_code == 200
     assert response.json()["run_id"] == "r1"
-    agent_id, task, result = calls["recorded"]
+    agent_id, task, result, executor = calls["recorded"]
     assert agent_id == "ag_1" and task == "do it" and result["answer"] == "done"
+    # console-started runs are tagged "test" (as opposed to "pensive" spawns)
+    assert executor == "test"
 
 
 def test_agent_run_recording_failure_does_not_break_run(monkeypatch):
