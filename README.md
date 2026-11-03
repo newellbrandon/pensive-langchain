@@ -231,6 +231,22 @@ The pipeline (ported from the leafy10 agent in `memory/memories.py`) works like 
    the fragments as a single flowing memory (best-effort, heuristic fallback).
    Enable rerank by setting `VOYAGE_API_KEY` in `.env`.
 
+### Memory pays off on repeat work (tokens, tools, runtime)
+
+Every agent run in the **Agents** tab — lab agents and chat-spawned subagents alike — is recorded in **Agent Workflows** with sortable **tokens**, **tool calls**, and **runtime**. That history makes it easy to see when scoped long-term memory (`agent:<id>`) is doing its job: later runs on the same task need less exploration, fewer tool round-trips, and finish faster because facts and procedures already live in the store instead of being rediscovered every time.
+
+![Agent Workflows: memory-backed runs trend toward fewer tokens, tool calls, and shorter runtime](agent_workflows_memory_efficiency.png)
+
+The same test agent (`55b371ea16dd`) on **11/3/2026** shows the pattern clearly as its memory namespace fills in:
+
+| When (local) | Tokens | Tool calls | Runtime | What it suggests |
+| ------------ | ------ | ---------- | ------- | ---------------- |
+| 2:41:07 PM | 27.9k | 4 | 59.5s | Cold run — full tool chain to complete the task |
+| 2:41:57 PM | 26.6k | 3 | 49.9s | Partial reuse — one fewer tool hop |
+| **2:45:06 PM** | **11.7k** | **1** | **14.3s** | **Warm run — memory-backed answer path (~58% fewer tokens, ~76% faster)** |
+
+Sort the workflow table by **Fewest tokens** or **Fastest** to surface agents worth promoting via **Reuse as specialist agent** — the runs that stay cheap are usually the ones that learned something durable on the first pass.
+
 ## Requirements
 
 - Python 3.13+
