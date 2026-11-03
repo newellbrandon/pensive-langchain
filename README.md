@@ -210,6 +210,10 @@ under per-type namespaces on the LangGraph MongoDB Store:
 | `taxonomic` | Categories or domain knowledge the user relies on    |
 | `procedural`| How the user does things (steps, output preferences) |
 
+The **Memories** tab in the Pensive Console (`/ui`) is where you browse and curate those types for a user. Edits save to MongoDB and are re-embedded automatically; **Merge duplicates** collapses semantically similar memories into one curated record.
+
+![Long-term memory in the Pensive Console: four types, per-user counts, and edit or prune](console_long_term_memory.png)
+
 The pipeline (ported from the leafy10 agent in `memory/memories.py`) works like this:
 
 1. **Intent planning** (`analyze_intent`) — an LLM turns the latest message into a

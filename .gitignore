@@ -74,3 +74,5 @@ document-uploads/
 
 # Glean OAuth token cache (personal credentials)
 .glean-tokens.json
+.agents/
+skills-lock.json
