@@ -583,6 +583,69 @@ class TestDocumentsSearchTool:
         assert "index down" in result["output"]
 
 
+class TestCitationFooter:
+    """Sources block appended at the END of a grounded answer (never inline).
+
+    The footer is parsed deterministically from the documents_search tool
+    digests already stored in the run's step transcripts, so it survives
+    answer rewording and is safe to copy-paste.
+    """
+
+    DIGEST = "\n".join([
+        "[ok] 5 matching chunk(s) from the ingested corpus:",
+        "  [0.52] High Performance MongoDB — Asya Kamsky (chunk 202): Storage Engines154 Changing how eviction works While Atlas",
+        "  [0.48] High Performance MongoDB — Asya Kamsky (chunk 386): Chapter 14 321 Addressing disk I/O bottlenecks",
+    ])
+
+    @staticmethod
+    def _steps_with(outputs):
+        return [
+            {"response": "a", "tool_calls": [{"name": "documents_search", "output": out}]}
+            for out in outputs
+        ]
+
+    def test_parses_digest_into_sources_block(self):
+        footer = docs.citation_footer(self._steps_with([self.DIGEST]))
+        assert footer is not None
+        assert footer.startswith("Sources:")
+        lines = footer.splitlines()
+        assert len(lines) == 3  # header + 2 hits
+        assert lines[1].startswith("- [0.52] High Performance MongoDB — Asya Kamsky, chunk 202")
+        assert "[error]" not in footer
+        assert footer.index("chunk 202") < footer.index("chunk 386")  # score-desc
+
+    def test_dedupes_repeated_chunks_keeping_best_score(self):
+        first = "  [0.40] Book (chunk 7): first snippet"
+        second = "  [0.55] Book (chunk 7): second deeper snippet"
+        footer = docs.citation_footer(self._steps_with([first, second]))
+        assert footer.count("chunk 7") == 1
+        assert "[0.55]" in footer and "[0.40]" not in footer
+        assert "second deeper snippet" in footer
+
+    def test_none_without_grounded_calls(self):
+        assert docs.citation_footer([]) is None
+        assert docs.citation_footer(
+            [{"tool_calls": [{"name": "web_search", "output": "[ok] web hit"}]}]
+        ) is None
+        assert docs.citation_footer(
+            self._steps_with(["[error] documents_search found no matches — try different wording"])
+        ) is None
+
+    def test_caps_source_count(self):
+        digest = "\n".join(
+            [f"  [{i / 10:.2f}] Book (chunk {i}): snippet {i}" for i in range(12)]
+        )
+        footer = docs.citation_footer(self._steps_with([digest]))
+        hits = [line for line in footer.splitlines() if line.startswith("- ")]
+        assert len(hits) == 8
+
+    def test_snippet_is_trimmed(self):
+        long = "  [0.90] Book (chunk 1): " + "word " * 60
+        footer = docs.citation_footer(self._steps_with([long]))
+        line = [l for l in footer.splitlines() if l.startswith("- ")][0]
+        assert len(line) < 200
+
+
 class TestDocumentsRoutes(unittest.TestCase):
     """Thin route layer: /api/admin/documents/* (see api/admin_routes.py)."""
 

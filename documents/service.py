@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -428,6 +429,49 @@ async def ingest_document(
 
 
 # --- retrieval ---------------------------------------------------------------
+
+# One line of the documents_search digest, e.g.
+#   [0.52] High Performance MongoDB — Asya Kamsky (chunk 202): text…
+_CITATION_LINE = re.compile(
+    r"^\s*\[([0-9.]+)\]\s+(.+?)\s+\(chunk\s+(\d+)\):\s*(.*)$"
+)
+_CITE_LIMIT = 8
+_CITE_SNIPPET = 100
+
+
+def citation_footer(steps: list[dict], limit: int = _CITE_LIMIT) -> Optional[str]:
+    """Sources block for an answer grounded in ``documents_search`` calls.
+
+    Parses the chunk digests already recorded in the run's step transcripts,
+    dedupes repeated chunks (best score wins), and returns a compact
+    end-of-answer block — ``None`` when the run never retrieved chunks, so
+    answers are never decorated with fabricated sources.
+    """
+    best: dict[tuple[str, int], tuple[float, str]] = {}
+    for step in steps or []:
+        for call in step.get("tool_calls") or []:
+            if call.get("name") != "documents_search":
+                continue
+            for line in str(call.get("output") or "").splitlines():
+                match = _CITATION_LINE.match(line.strip())
+                if not match:
+                    continue
+                score = float(match.group(1))
+                title = match.group(2).strip()
+                chunk = int(match.group(3))
+                snippet = " ".join(match.group(4).split())
+                key = (title, chunk)
+                if key not in best or score > best[key][0]:
+                    best[key] = (score, snippet)
+    if not best:
+        return None
+    ordered = sorted(best.items(), key=lambda pair: pair[1][0], reverse=True)
+    lines = ["Sources:"]
+    for (title, chunk), (score, snippet) in ordered[: max(1, int(limit))]:
+        if len(snippet) > _CITE_SNIPPET:
+            snippet = snippet[:_CITE_SNIPPET].rstrip() + "…"
+        lines.append(f"- [{score:.2f}] {title}, chunk {chunk} — “{snippet}”")
+    return "\n".join(lines)
 
 
 def _rank(

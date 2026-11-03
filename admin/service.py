@@ -21,6 +21,7 @@ from typing import Any, Collection, Optional
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, safe_workspace_path, workspace_root
+from documents import service as documents_service
 from glean.client import get_glean_client
 from utils.llm import get_responses_client
 from config import Config
@@ -948,6 +949,13 @@ async def run_agent(
         )
         if not tool_calls:
             break
+
+    # Grounding receipts: when the run retrieved corpus chunks, the answer
+    # ends with a deterministic Sources block (parsed from the stored tool
+    # digests) — never inline, so the answer text stays clean to copy-paste.
+    footer = documents_service.citation_footer(steps)
+    if footer and answer and "Sources:" not in answer:
+        answer = f"{answer}\n\n{footer}"
 
     return {
         "answer": answer,
