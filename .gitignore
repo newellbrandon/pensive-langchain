@@ -70,6 +70,7 @@ logs/
 .archive/
 # Agent lab sandboxes (generated content, host-mounted)
 agent-workspaces/
+document-uploads/
 
 # Glean OAuth token cache (personal credentials)
 .glean-tokens.json

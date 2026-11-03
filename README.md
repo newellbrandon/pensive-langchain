@@ -11,7 +11,7 @@ The API is **OpenAI-compatible** so you can connect [OpenWebUI](https://docs.ope
 
 ### System overview
 
-OpenWebUI or a coding harness sends chat requests to the FastAPI layer, which invokes a compiled LangGraph workflow. MongoDB holds short-term thread state (checkpointer) and long-term facts (store with vector search). On top of the core chat loop, Pensive runs a **server-tool layer** (subagent delegation, project browsing, Glean enterprise search), an **agent lab** (isolated, runnable/rerunnable agents) and a **management console** at `/ui` — with every agent workflow recorded as sortable, metric-bearing run history.
+OpenWebUI or a coding harness sends chat requests to the FastAPI layer, which invokes a compiled LangGraph workflow. MongoDB holds short-term thread state (checkpointer) and long-term facts (store with vector search). On top of the core chat loop, Pensive runs a **server-tool layer** (subagent delegation, project browsing, Glean enterprise search), an **agent lab** (isolated, runnable/rerunnable agents), a **document knowledge base** (contextualized chunk embeddings — agents ground answers in uploaded PDFs via `documents_search` on demand), and a **management console** at `/ui` — with every agent workflow recorded as sortable, metric-bearing run history.
 
 Pensive exposes both OpenAI-compatible protocols: **Chat Completions** (`POST /v1/chat/completions`) and the **Responses API** (`POST /v1/responses`). OpenWebUI can be pointed at either connection type.
 
@@ -28,12 +28,14 @@ flowchart TD
   sub -->|"runs the same graph"| lg
   lg -.->|"glean_* tools · MCP + OAuth2"| glean[("Glean enterprise search")]
   lg -.->|"project_list / project_read"| projects[("~/projects · read-only")]
+  lg -.->|"documents_search · on demand"| dstore[("document_chunks<br/>voyage-context-4 · 1024d")]
 
   subgraph console["Pensive Console — /ui"]
-    ui["Memories · Agents lab · Glean · System Prompt"]
+    ui["Memories · Agents lab · Documents · Glean · System Prompt"]
   end
   ui -->|"run_agent · same graph"| lg
   ui -->|"records executed workflows"| runs[("pensive_agent_runs<br/>pensive/test tags · metrics · 1500/30d retention")]
+  ui -->|"upload → extract → embed (contextualized)"| dstore
   api --> ui
 ```
 
@@ -131,13 +133,14 @@ while providing persistent memory for important context:
 ## Pensive Console (Web UI)
 
 The management UI lives at **`http://<host>:8000/ui`** (MongoDB visual theme — dark navy
-canvas, mongo-green accents) and powers four tabs:
+canvas, mongo-green accents) and powers five tabs:
 
 | Tab | What you can do |
 | --- | --------------- |
 | **Memories** | Browse and curate the four long-term memory types per user — **Semantic** (user facts and preferences), **Episodic** (session events, decisions, outcomes), **Taxonomic** (domain vocabulary and reusable concepts like corporate policies), **Procedural** (reusable workflows and agent runbooks — skills). Correct a memory and it is **re-embedded automatically** (the write goes through the LangGraph store's vector index); prune to delete. Saves **iterate instead of duplicating**: repeated facts merge into the existing memory (vector-similarity match with lexical fallback, normalized labels), and a **Merge duplicates** button groups semantically similar memories into one complete curated memory per group — near-identical line items collapse (longer version wins) and each group gets an LLM consolidation pass so the result reads as one memory, not a concatenation. The live store went from 101 → 31 memories with the content preserved. |
 | **System Prompt** | View and change the assistant persona injected at the top of every main-context request. Persisted in MongoDB; leave empty to restore the built-in default. |
-| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. The tab is split into three segmented views: **Test Agents** (create form + registry; leave the name blank to **auto-generate** one like `coral-scribe-3621`, and tools empty for the built-in sandboxed set `write_file`, `append_file`, `read_file`, `run_command`, `web_search`, `web_extract`), **Test Agent History** (every lab-agent run, locked to `test`, sortable), and **Agent Workflows** (every workflow incl. `pensive` subagent runs — aligned Source · Agent · When · Tokens · Tool calls · Runtime columns with clickable filter chips and sort chips). Clicking any row expands the full task, answer, step transcripts, a **Reuse as specialist agent** action, and the workspace files (assets) — a capable subagent (say, a great Glean researcher) can be promoted into a permanent, rerunnable agent with its own memory scope. **Edit any agent** (Edit button loads its name/prompt/tools back into the form), and open **Runs & artifacts** on a card to review past runs — each run shows a **step-by-step transcript** (model response, decisions, and every executed tool call with full arguments and results), a one-click **Run again** button, and a **workspace file browser** (list + content preview via `GET /agents/{id}/workspace`). |
+| **Agents** | Deploy a **test agent** with its own system prompt and tools, then run a task in **complete isolation** — memory is scoped to `agent:<id>` so it can't pollute (or be polluted by) the main Pensive context. The tab is split into three segmented views: **Test Agents** (create form + registry; leave the name blank to **auto-generate** one like `coral-scribe-3621`, and tools empty for the built-in sandboxed set `write_file`, `append_file`, `read_file`, `run_command`, `web_search`, `web_extract`, `documents_search`), **Test Agent History** (every lab-agent run, locked to `test`, sortable), and **Agent Workflows** (every workflow incl. `pensive` subagent runs — aligned Source · Agent · When · Tokens · Tool calls · Runtime columns with clickable filter chips and sort chips). Clicking any row expands the full task, answer, step transcripts, a **Reuse as specialist agent** action, and the workspace files (assets) — a capable subagent (say, a great Glean researcher) can be promoted into a permanent, rerunnable agent with its own memory scope. **Edit any agent** (Edit button loads its name/prompt/tools back into the form), and open **Runs & artifacts** on a card to review past runs — each run shows a **step-by-step transcript** (model response, decisions, and every executed tool call with full arguments and results), a one-click **Run again** button, and a **workspace file browser** (list + content preview via `GET /agents/{id}/workspace`). |
+| **Documents** | Build a **queryable knowledge base** from uploaded files (PDF / txt / md) using **contextualized chunk embeddings** (`voyage-context-4`) — extract text (pypdf), split into bounded segments, and embed each chunk **in the context of its full document** (server-side auto-chunking, 512-token chunks, char-budgeted batches to respect the API's per-request token cap). The library lists every document with its status (`ingesting → ready | failed`), pages, chunk count, tokens, and model — plus **Chunk preview** (text per chunk), **Re-embed** (retry a failed ingest), and **Delete** (drops chunks + the stored original). A **semantic search** box embeds the query (`input_type=query`) and returns the top-k chunks with scores, optionally restricted to one document. The **`documents_search` tool** then makes the corpus available to every agent on demand — it is never injected into prompts, so queries that don't need it pay nothing. |
 | **Glean** | Connect Pensive to the Glean MCP server (MongoDB enterprise search) with a native **OAuth2 dynamic-client flow** (DCR + PKCE; the `MCP` scope is required by Glean): status + token expiry, **Connect** (opens the authorization screen; the callback rides the existing `localhost:8000` port), **Refresh token**, **Disconnect**, and a **smoke-test box** that calls any discovered tool (`search: …` runs `glean_search`). Once connected, the ~13 discovered Glean tools are available to main chats **and every agent run** as `glean_*` server tools, permission-scoped to the signed-in user. The token cache (` .glean-tokens.json`) is gitignored and bind-mounted — a single-user dev credential, never to be shipped. |
 
 **Agent tool execution.** Agent tool calls are actually *executed*: file and shell tools run inside a per-agent workspace directory (`./agent-workspaces/<agent_id>/`, mounted into the container so built apps survive restarts), results are fed back to the model in a loop (up to 24 steps), and transient upstream failures or broken tool-call payloads are retried automatically. Every tool failure becomes a model-visible `[error]` result — never a crash — with actionable guidance (invalid JSON is reported with reissue instructions; large files should be built with `append_file`). Completed runs are persisted (`pensive_agent_runs`) with their answer, decisions, and executed tool calls so past agents can be reviewed and re-run — the counts **aggregate every executed call, server-tool executions included** (glean/spawn/project work inside the generate loop is folded into the step transcripts), and legacy runs derive their call/step totals from the stored transcripts. The workflow list is **retained to at most 1500 runs and none older than 30 days** — whichever limit is hit first, enforced after every recorded run.
@@ -148,7 +151,41 @@ Backing REST API (all under `/api/admin`): `memory-types`, `memories` (GET/PUT/D
 (global workflow feed, tagged `pensive` vs `test`, filterable via
 `?executor=` and sortable by `created_at`
 / `tokens_total` / `duration_ms` / tool-call and step counts via
-`?sort_by=&order=`).
+`?sort_by=&order=`), and `documents` (`GET` library + `POST /upload` (multipart,
+background ingest) + `DELETE /{id}` + `POST /{id}/reembed` + `GET /{id}/chunks`
++ `POST /search`).
+
+## Document Knowledge Base (contextualized chunk embeddings)
+
+Documents uploaded on the **Documents** tab become a searchable corpus agents can
+ground answers in — on demand, never ambient:
+
+1. **Extract** — PDFs are read with `pypdf` (page count kept); `.txt`/`.md` pass
+   straight through. Originals are stored under `document-uploads/` (bind-mounted —
+   deliberately outside the `documents/` python package) so re-embedding works
+   after restarts.
+2. **Segment** — text is split into bounded segments (≤ 90K chars, preferring
+   paragraph boundaries) and sent in **char-budgeted batches** — the contextualized
+   embedding API caps a whole request at 120K tokens, so batches stay well inside
+   the budget.
+3. **Embed** — each batch goes to `POST {CONTEXT_EMBEDDING_URI}`
+   (`https://ai.mongodb.com/v1/contextualizedembeddings` by default, same key as
+   `LLM_EMBEDDING_KEY`) with `model=voyage-context-4`, `input_type=document` and
+   **server-side auto-chunking** (512-token chunks): every chunk is encoded in the
+   context of its full document, so vectors carry book-level context without any
+   manual metadata augmentation. Chunk text + 1024-dim vectors land in
+   `document_chunks`; status bookkeeping (`ingesting → ready | failed`, chunk
+   count, tokens, pages, model) in `documents`.
+4. **Query** — the same endpoint encodes the query (`input_type=query`); the top-k
+   chunks are found with cosine similarity over the stored vectors (pure-Python
+   scan — at lab scale no Atlas Search index is needed; swap in `$vectorSearch`
+   when the corpus grows). Optionally restrict to one document.
+
+Every agent's toolset includes **`documents_search(query, k?, document?)`**: the
+model chooses when to consult the corpus (e.g. a MongoDB-performance question
+against the High Performance MongoDB book), pays for one query embedding + scan
+only when it does, and grounds its answer in the returned chunks with scores.
+The corpus is never injected into prompts automatically.
 
 ## Long-Term Memory (Four Types)
 
@@ -190,6 +227,7 @@ The pipeline (ported from the leafy10 agent in `memory/memories.py`) works like 
 - MongoDB with Vector Search (local 8.x or Atlas)
 - OpenAI-compatible LLM endpoint. Pensive speaks the OpenAI **Responses API** (`LLM_URI`, `LLM_KEY`, `LLM_MODEL`) so it works correctly with reasoning models; the final answer is read from the response's `output` message items and any model reasoning/"thinking" is discarded.
 - Voyage embeddings via MongoDB AI (`LLM_EMBEDDING_KEY`) — custom `VoyageEmbeddings` client in `utils/llm.py`
+- Document ingestion uses the same key against the **contextualized embeddings** endpoint (`CONTEXT_EMBEDDING_URI`, default `https://ai.mongodb.com/v1/contextualizedembeddings`, model `CONTEXT_EMBEDDING_MODEL`, default `voyage-context-4`) — the Files tab uploads land here with server-side auto-chunking
 - Optional memory rerank — set `VOYAGE_API_KEY` to enable Voyage reranking of retrieved memories; otherwise Pensive ranks by vector similarity.
 
 ## Setup

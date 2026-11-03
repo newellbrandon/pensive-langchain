@@ -23,6 +23,7 @@
       <button class="tab active" data-tab="memories">Memories</button>
       <button class="tab" data-tab="prompt">System Prompt</button>
       <button class="tab" data-tab="agents">Agents</button>
+      <button class="tab" data-tab="documents">Documents</button>
       <button class="tab" data-tab="glean">Glean</button>
     </nav>
     <a class="mongo-link" href="https://www.mongodb.com" target="_blank" rel="noopener">mongodb.com ↗</a>
@@ -95,7 +96,7 @@
             <label class="field span-2">
               <span>Tools (JSON array of OpenAI function definitions)</span>
               <textarea id="agent-tools" rows="4" spellcheck="false" placeholder='[{"type":"function","function":{"name":"write_file",…}}]'></textarea>
-              <span class="hint">Built-in tools available in the agent workspace: <code>write_file</code>, <code>append_file</code>, <code>read_file</code>, <code>run_command</code>, <code>web_search</code> (DuckDuckGo), <code>web_extract</code> (page content). Leave tools empty to enable all of them.</span>
+              <span class="hint">Built-in tools available in the agent workspace: <code>write_file</code>, <code>append_file</code>, <code>read_file</code>, <code>run_command</code>, <code>web_search</code> (DuckDuckGo), <code>web_extract</code> (page content), <code>documents_search</code> (your ingested corpus — PDFs/text embedded with contextualized chunks). Leave tools empty to enable all of them.</span>
             </label>
           </div>
           <div class="card-actions">
@@ -151,6 +152,68 @@
           <p class="hint">Every workflow, newest first by default — <em>pensive</em> runs are subagents spawned from a chat, <em>test</em> runs are lab agents started here. Sort by tokens, duration, or activity to spot low-token, high-performing agents worth promoting into reusable tools. Subagent rows offer <em>Reuse as specialist agent</em>.</p>
           <div id="recent-runs" class="runs-list"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- ============ DOCUMENTS ============ -->
+    <section id="tab-documents" class="tab-panel">
+      <div class="panel-head">
+        <h1>Documents</h1>
+        <p class="sub">Ingest PDFs and text files with <strong>contextualized chunk embeddings</strong> (<code>voyage-context-4</code>) — each chunk is encoded with the context of its full document. Agents read the corpus on demand through the <code>documents_search</code> tool; it is never injected into prompts automatically.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Upload document</h2>
+        <div class="form-grid">
+          <label class="field">
+            <span>File (PDF / txt / md)</span>
+            <input id="doc-file" type="file" accept=".pdf,.txt,.md" />
+          </label>
+          <label class="field">
+            <span>Title (optional)</span>
+            <input id="doc-title" type="text" placeholder="e.g. High Performance MongoDB — Kamsky" />
+          </label>
+        </div>
+        <div class="card-actions">
+          <button id="upload-doc" class="btn primary">Upload &amp; embed</button>
+          <span id="doc-upload-status" class="status"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head-row">
+          <h2 class="card-title">Semantic search</h2>
+        </div>
+        <div class="form-grid">
+          <label class="field span-2">
+            <span>Query</span>
+            <input id="doc-query" type="text" placeholder="e.g. how does WiredTiger handle cache eviction?" />
+          </label>
+          <label class="field">
+            <span>Results</span>
+            <select id="doc-k">
+              <option value="3">3</option>
+              <option value="5" selected>5</option>
+              <option value="10">10</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Restrict to</span>
+            <select id="doc-filter"><option value="">All documents</option></select>
+          </label>
+        </div>
+        <div class="card-actions">
+          <button id="search-docs" class="btn primary">Search corpus</button>
+        </div>
+        <div id="doc-results" class="runs-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head-row">
+          <h2 class="card-title">Library</h2>
+          <button id="refresh-docs" class="btn ghost">Refresh</button>
+        </div>
+        <div id="document-list"></div>
       </div>
     </section>
 

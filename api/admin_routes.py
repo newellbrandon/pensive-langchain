@@ -2,16 +2,24 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from admin import service as admin
+from config import Config
+from documents import service as docs
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+# Uploaded originals cap — big enough for books/whitepapers, small enough to
+# keep the documents volume and extraction times sane.
+MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 
 
 def _bad_request(exc: Exception) -> HTTPException:
@@ -45,6 +53,12 @@ class AgentUpdateRequest(BaseModel):
 
 class AgentRunRequest(BaseModel):
     task: str
+
+
+class DocumentSearchRequest(BaseModel):
+    query: str
+    k: int = 5
+    doc_id: Optional[str] = None
 
 
 @router.get("/memory-types")
@@ -207,3 +221,110 @@ async def agent_workspace_file(agent_id: str, path: str) -> dict:
     except ValueError as exc:
         raise _bad_request(exc)
     return {"path": path, "content": content}
+
+
+# --- documents: ingestion + library ------------------------------------------
+#
+# Uploads are embedded in the background with contextualized chunk embeddings
+# (voyage-context-4) and indexed in document_chunks. The documents_search tool
+# then lets agents query the corpus on demand — nothing is injected into
+# prompts automatically.
+
+
+@router.get("/documents")
+async def list_documents() -> dict:
+    return {"documents": docs.list_documents(docs.docs_collection())}
+
+
+@router.post("/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks = None,
+) -> dict:
+    """Accept a PDF/txt/md upload; the actual embedding runs in the background.
+
+    The document is recorded as ``ingesting`` immediately so the UI can show
+    progress; a BackgroundTask drives it to ``ready`` or ``failed``.
+    """
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    filename = Path(file.filename or "").name
+    suffix = Path(filename).suffix.lower()
+    if not filename or suffix not in docs.SUPPORTED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unsupported file type {suffix or '(none)'} — supported: "
+                f"{', '.join(sorted(docs.SUPPORTED_SUFFIXES))}"
+            ),
+        )
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file too large ({len(content)} bytes, max {MAX_UPLOAD_BYTES})",
+        )
+    doc_id = uuid.uuid4().hex[:12]
+    stored_root = Path(Config.DOCUMENTS_DIR).expanduser()
+    stored_root.mkdir(parents=True, exist_ok=True)
+    stored_path = stored_root / f"{doc_id}{suffix}"
+    stored_path.write_bytes(content)
+    docs_coll = docs.docs_collection()
+    chunks_coll = docs.chunks_collection()
+    record = docs.create_document(doc_id, filename, str(stored_path), len(content), title=title)
+    docs_coll.insert_one(record)
+    background_tasks.add_task(
+        docs.ingest_document, doc_id, str(stored_path), filename, docs_coll, chunks_coll, title=title
+    )
+    return {"document": docs.public_doc(record)}
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document(doc_id: str) -> dict:
+    if not docs.delete_document(doc_id, docs.docs_collection(), docs.chunks_collection()):
+        raise HTTPException(status_code=404, detail=f"document not found: {doc_id}")
+    return {"deleted": True}
+
+
+@router.post("/documents/{doc_id}/reembed")
+async def reembed_document(doc_id: str, background_tasks: BackgroundTasks = None) -> dict:
+    """Retry a failed ingest (or re-run a successful one) in the background."""
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    docs_coll = docs.docs_collection()
+    record = docs.get_document(doc_id, docs_coll)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"document not found: {doc_id}")
+    docs.set_status(doc_id, docs_coll, "ingesting", error=None)
+    chunks_coll = docs.chunks_collection()
+    background_tasks.add_task(
+        docs.ingest_document,
+        doc_id,
+        record["path"],
+        record["filename"],
+        docs_coll,
+        chunks_coll,
+        title=record.get("title"),
+    )
+    return {"document": docs.public_doc(docs.get_document(doc_id, docs_coll))}
+
+
+@router.get("/documents/{doc_id}/chunks")
+async def list_document_chunks(doc_id: str, limit: int = 25) -> dict:
+    """Chunk text preview (no embeddings) for the library UI."""
+    chunks = docs.get_chunks(doc_id, docs.chunks_collection(), limit=limit)
+    return {"doc_id": doc_id, "total": len(chunks), "chunks": chunks}
+
+
+@router.post("/documents/search")
+async def search_documents(body: DocumentSearchRequest) -> dict:
+    """Semantic search over ingested chunks (contextualized embeddings)."""
+    results = await docs.search_documents(
+        query=body.query,
+        docs_coll=docs.docs_collection(),
+        chunks_coll=docs.chunks_collection(),
+        k=body.k,
+        doc_id=body.doc_id,
+    )
+    return {"query": body.query, "results": results}

@@ -16,6 +16,8 @@ from typing import Callable
 
 from ddgs import DDGS
 
+from documents import service as documents_service
+
 # --- workspaces --------------------------------------------------------------
 
 def workspace_root(agent_id: str, base: Path | None = None) -> Path:
@@ -263,6 +265,41 @@ def execute_project_tool_call(
         return {"name": name, "output": f"[error] {type(exc).__name__}: {exc}"}
 
 
+def _handle_documents_search(args: dict, workspace: Path) -> str:
+    """Semantic search over ingested documents (contextualized chunk embeddings).
+
+    The corpus holds documents uploaded in the console Documents tab
+    (PDFs/text — e.g. the High Performance MongoDB book), embedded with
+    voyage-context-4 so each chunk captures full-document context. Returns the
+    top-k matching chunks with scores; the model grounds answers in the text.
+    """
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ValueError("query is required")
+    try:
+        k = int(args.get("k") or 5)
+    except (TypeError, ValueError):
+        k = 5
+    k = max(1, min(k, 10))
+    doc_id = str(args.get("document") or "").strip() or None
+    hits = documents_service.search_documents_sync(query, k=k, doc_id=doc_id)
+    if not hits:
+        return (
+            "[error] documents_search found no matches — try different wording. "
+            "If nothing is uploaded yet, add documents (PDF/txt/md) in the "
+            "console Documents tab first."
+        )
+    lines = [f"[ok] {len(hits)} matching chunk(s) from the ingested corpus:"]
+    for hit in hits:
+        title = hit.get("document_title") or hit.get("document_id") or "?"
+        score = float(hit.get("score") or 0.0)
+        snippet = " ".join(str(hit.get("text") or "").split())[:300]
+        lines.append(
+            f"  [{score:.2f}] {title} (chunk {int(hit.get('chunk_index') or 0)}): {snippet}"
+        )
+    return "\n".join(lines)
+
+
 _HANDLERS: dict[str, Callable[[dict, Path], str]] = {
     "write_file": _handle_write_file,
     "append_file": _handle_append_file,
@@ -270,6 +307,7 @@ _HANDLERS: dict[str, Callable[[dict, Path], str]] = {
     "run_command": _handle_run_command,
     "web_search": _handle_web_search,
     "web_extract": _handle_web_extract,
+    "documents_search": _handle_documents_search,
 }
 
 # --- tool definitions (OpenAI function schema) --------------------------------
@@ -352,6 +390,20 @@ DEFAULT_AGENT_TOOLS: list[dict] = [
         "truncated to ~40000 characters). Use project_list to discover paths.",
         {"path": {"type": "string", "description": "Relative file path inside projects, e.g. okf/index.md"}},
         ["path"],
+    ),
+    _function(
+        "documents_search",
+        "Search the ingested knowledge base: documents uploaded in the console "
+        "Documents tab (PDFs and text files, e.g. the High Performance MongoDB "
+        "book), embedded with contextualized chunk embeddings (voyage-context-4) "
+        "so chunks carry full-document context. Ground answers in the returned "
+        "chunks when the task concerns the ingested corpus (e.g. MongoDB "
+        "performance/internals). Use web_search or glean_search for anything "
+        "not covered by the corpus.",
+        {"query": {"type": "string", "description": "Natural-language search query"},
+         "k": {"type": "integer", "description": "Number of chunks to return (default 5, max 10)"},
+         "document": {"type": "string", "description": "Optional document id to restrict the search to (shown in the console Documents tab)"}},
+        ["query"],
     ),
 ]
 

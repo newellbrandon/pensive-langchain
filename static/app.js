@@ -17,8 +17,9 @@ const state = {
 /* ---------- helpers ---------- */
 
 async function api(path, options = {}) {
+  const isForm = options.body instanceof FormData;
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers: isForm ? {} : { "Content-Type": "application/json" },
     ...options,
   });
   let body = null;
@@ -69,6 +70,7 @@ document.getElementById("tabs").addEventListener("click", (event) => {
   if (button.dataset.tab === "memories") loadMemories();
   if (button.dataset.tab === "prompt") loadPrompt();
   if (button.dataset.tab === "agents") showAgentsView(agentsViewState.view);
+  if (button.dataset.tab === "documents") loadDocuments();
   if (button.dataset.tab === "glean") loadGlean();
 });
 
@@ -830,6 +832,217 @@ document.getElementById("create-agent").addEventListener("click", async () => {
 });
 
 document.getElementById("cancel-edit").addEventListener("click", cancelEdit);
+
+/* ---------- documents ---------- */
+
+const docsState = { pollTimer: null, filterDocId: "" };
+
+async function loadDocuments() {
+  if (docsState.pollTimer) {
+    clearTimeout(docsState.pollTimer);
+    docsState.pollTimer = null;
+  }
+  const box = document.getElementById("document-list");
+  const uploadStatus = document.getElementById("doc-upload-status");
+  if (uploadStatus) uploadStatus.textContent = "";
+  try {
+    const data = await api("/api/admin/documents");
+    const docs = data.documents || [];
+    box.innerHTML = "";
+    if (!docs.length) {
+      box.innerHTML = `<div class="empty">No documents yet — upload a PDF or text file above to build a searchable corpus.</div>`;
+    } else {
+      for (const doc of docs) box.appendChild(documentCard(doc));
+    }
+    fillDocFilter(docs);
+    // While anything is embedding, poll until the batch settles.
+    if (docs.some((d) => d.status === "ingesting")) {
+      docsState.pollTimer = setTimeout(loadDocuments, 2500);
+    }
+  } catch (error) {
+    box.innerHTML = `<div class="empty">Could not load documents: ${esc(error.message)}</div>`;
+  }
+}
+
+function fillDocFilter(docs) {
+  const select = document.getElementById("doc-filter");
+  if (!select) return;
+  const previous = docsState.filterDocId;
+  select.innerHTML = `<option value="">All documents</option>`;
+  for (const doc of docs) {
+    const option = document.createElement("option");
+    option.value = doc.doc_id;
+    option.textContent = doc.title || doc.filename;
+    select.appendChild(option);
+  }
+  select.value = docs.some((d) => d.doc_id === previous) ? previous : "";
+  docsState.filterDocId = select.value;
+}
+
+function statusPill(status) {
+  const label = status === "ready" ? "ready" : status === "failed" ? "failed" : "embedding…";
+  return `<span class="status-pill ${esc(status)}">${label}</span>`;
+}
+
+function documentCard(doc) {
+  const div = document.createElement("div");
+  div.className = "doc-row";
+  const meta = [
+    doc.filename,
+    doc.pages ? `${doc.pages} pages` : null,
+    doc.size_bytes ? `${(doc.size_bytes / 1024 / 1024).toFixed(1)} MB` : null,
+    `${doc.chunk_count} chunks`,
+    doc.tokens_total ? `${doc.tokens_total.toLocaleString()} tokens` : null,
+    doc.model,
+  ].filter(Boolean).join(" · ");
+  const actions = [];
+  if (doc.status === "failed") {
+    actions.push(`<button class="btn small" data-doc-action="reembed">Re-embed</button>`);
+  }
+  actions.push(`<button class="btn ghost small" data-doc-action="chunks">Chunks</button>`);
+  actions.push(`<button class="btn ghost small danger" data-doc-action="delete">Delete</button>`);
+  div.innerHTML = `
+    <div class="doc-head">
+      <div>
+        <div class="doc-title">${esc(doc.title || doc.filename)} ${statusPill(doc.status)}</div>
+        <div class="doc-meta">${esc(meta)}</div>
+        ${doc.status === "failed" && doc.error ? `<div class="doc-error">${esc(doc.error)}</div>` : ""}
+      </div>
+      <div class="doc-actions">${actions.join("")}</div>
+    </div>
+    <details class="docs-chunks" hidden>
+      <summary>Chunk preview</summary>
+      <div class="chunk-list"></div>
+    </details>
+  `;
+  const details = div.querySelector(".docs-chunks");
+  div.querySelector('[data-doc-action="chunks"]').addEventListener("click", () => {
+    details.hidden = !details.hidden;
+    if (details.hidden) return;
+    const list = details.querySelector(".chunk-list");
+    list.innerHTML = `<p class="hint">Loading chunks…</p>`;
+    api(`/api/admin/documents/${encodeURIComponent(doc.doc_id)}/chunks?limit=25`)
+      .then((data) => {
+        list.innerHTML = "";
+        if (!data.chunks.length) {
+          list.innerHTML = `<p class="hint">No chunks stored.</p>`;
+          return;
+        }
+        for (const chunk of data.chunks) {
+          const row = document.createElement("div");
+          row.className = "chunk-row";
+          row.innerHTML = `<span class="chunk-idx">#${chunk.chunk_index}</span><p>${esc(chunk.text)}</p>`;
+          list.appendChild(row);
+        }
+      })
+      .catch((error) => {
+        list.innerHTML = `<p class="hint" style="color:var(--danger)">${esc(error.message)}</p>`;
+      });
+  });
+  const reembedBtn = div.querySelector('[data-doc-action="reembed"]');
+  if (reembedBtn) {
+    reembedBtn.addEventListener("click", async () => {
+      try {
+        await api(`/api/admin/documents/${encodeURIComponent(doc.doc_id)}/reembed`, {
+          method: "POST",
+        });
+        toast(`Re-embedding “${doc.title || doc.filename}”…`);
+        loadDocuments();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    });
+  }
+  div.querySelector('[data-doc-action="delete"]').addEventListener("click", async () => {
+    if (!confirm(`Delete document “${doc.title || doc.filename}” and its ${doc.chunk_count} embedded chunks?`)) return;
+    try {
+      await api(`/api/admin/documents/${encodeURIComponent(doc.doc_id)}`, { method: "DELETE" });
+      toast("Document deleted");
+      loadDocuments();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  return div;
+}
+
+async function uploadDocument() {
+  const input = document.getElementById("doc-file");
+  const statusEl = document.getElementById("doc-upload-status");
+  const file = input.files && input.files[0];
+  if (!file) {
+    toast("Choose a PDF or text file first", true);
+    return;
+  }
+  const title = document.getElementById("doc-title").value.trim();
+  const form = new FormData();
+  form.append("file", file);
+  if (title) form.append("title", title);
+  const button = document.getElementById("upload-doc");
+  button.disabled = true;
+  statusEl.textContent = "Uploading…";
+  try {
+    await api("/api/admin/documents/upload", { method: "POST", body: form });
+    statusEl.textContent = "";
+    input.value = "";
+    document.getElementById("doc-title").value = "";
+    toast("Uploaded — embedding in the background…");
+    loadDocuments();
+  } catch (error) {
+    statusEl.textContent = "";
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function searchDocuments() {
+  const box = document.getElementById("doc-results");
+  const query = document.getElementById("doc-query").value.trim();
+  if (!query) {
+    toast("Enter a query first", true);
+    return;
+  }
+  box.innerHTML = `<p class="hint">Searching the corpus…</p>`;
+  try {
+    const data = await api("/api/admin/documents/search", {
+      method: "POST",
+      body: JSON.stringify({
+        query,
+        k: Number(document.getElementById("doc-k").value),
+        doc_id: document.getElementById("doc-filter").value || null,
+      }),
+    });
+    const results = data.results || [];
+    box.innerHTML = "";
+    if (!results.length) {
+      box.innerHTML = `<div class="empty">No matching chunks — try different wording, or upload more documents.</div>`;
+      return;
+    }
+    for (const hit of results) {
+      const row = document.createElement("div");
+      row.className = "search-hit";
+      row.innerHTML = `
+        <div class="search-hit-head">
+          <span class="score-pill">${(hit.score * 100).toFixed(0)}%</span>
+          <span class="search-hit-title">${esc(hit.document_title)}</span>
+          <span class="search-hit-meta">chunk ${hit.chunk_index}</span>
+        </div>
+        <p>${esc(hit.text)}</p>
+      `;
+      box.appendChild(row);
+    }
+  } catch (error) {
+    box.innerHTML = `<div class="empty">Search failed: ${esc(error.message)}</div>`;
+  }
+}
+
+document.getElementById("upload-doc").addEventListener("click", uploadDocument);
+document.getElementById("search-docs").addEventListener("click", searchDocuments);
+document.getElementById("refresh-docs").addEventListener("click", loadDocuments);
+document.getElementById("doc-query").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") searchDocuments();
+});
 
 /* ---------- glean ---------- */
 

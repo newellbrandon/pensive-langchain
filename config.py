@@ -37,6 +37,21 @@ class Config:
     LLM_EMBEDDING_KEY: str = os.getenv("LLM_EMBEDDING_KEY", "")
     EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "1024"))
 
+    # Contextualized chunk embeddings for document ingestion: the
+    # <base>/contextualizedembeddings endpoint of the same Voyage surface as
+    # LLM_EMBEDDING_URI (reuses LLM_EMBEDDING_KEY). Documents are embedded with
+    # input_type=document + server-side auto-chunking so every chunk carries
+    # full-document context; queries use input_type=query.
+    CONTEXT_EMBEDDING_URI: str = os.getenv(
+        "CONTEXT_EMBEDDING_URI", "https://ai.mongodb.com/v1/contextualizedembeddings"
+    )
+    CONTEXT_EMBEDDING_MODEL: str = os.getenv("CONTEXT_EMBEDDING_MODEL", "voyage-context-4")
+    # Originals of uploaded documents are kept here so re-embedding / forensics
+    # work after restarts (bind-mounted in docker-compose). NOT the documents/
+    # python package: the runtime dir stays separate so the bind mount can
+    # never shadow application code.
+    DOCUMENTS_DIR: str = os.getenv("DOCUMENTS_DIR", "document-uploads")
+
     LANGSMITH_TRACING: bool = _env_truthy("LANGSMITH_TRACING")
     LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
     LANGSMITH_PROJECT: str = _strip_quotes(os.getenv("LANGSMITH_PROJECT", "pensive"))

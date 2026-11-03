@@ -27,6 +27,9 @@ services:
       - API_PORT=8000
       - PENSIVE_AGENT_WORKSPACES=/app/agent-workspaces
       - PENSIVE_PROJECTS_ROOT=/projects
+      - DOCUMENTS_DIR=/app/document-uploads
+      - CONTEXT_EMBEDDING_URI=${CONTEXT_EMBEDDING_URI:-https://ai.mongodb.com/v1/contextualizedembeddings}
+      - CONTEXT_EMBEDDING_MODEL=${CONTEXT_EMBEDDING_MODEL:-voyage-context-4}
       - GLEAN_MCP_URL=${GLEAN_MCP_URL:-https://mongodb-be.glean.com/mcp/default}
       - GLEAN_SCOPE=${GLEAN_SCOPE:-SEARCH DOCUMENTS ENTITIES MCP}
       - GLEAN_REDIRECT_URI=${GLEAN_REDIRECT_URI:-http://localhost:8000/glean/callback}
@@ -35,6 +38,10 @@ services:
       # Agent lab workspaces live on the host so built apps survive container
       # recreations (path: ${PENSIVE_AGENT_WORKSPACES:-./agent-workspaces}).
       - ./agent-workspaces:/app/agent-workspaces
+      # Uploaded document originals (PDFs/text) survive container recreations.
+      # Kept OUTSIDE the documents/ python package so the bind mount can never
+      # shadow application code.
+      - ./document-uploads:/app/document-uploads
       # Host projects dir (including the OKF bundle) — READ-ONLY.
       - ${PROJECTS_HOST_DIR:-${HOME}/projects}:/projects:ro
       # Glean OAuth token cache (one user's local dev credentials).
