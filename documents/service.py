@@ -436,18 +436,19 @@ _CITATION_LINE = re.compile(
     r"^\s*\[([0-9.]+)\]\s+(.+?)\s+\(chunk\s+(\d+)\):\s*(.*)$"
 )
 _CITE_LIMIT = 8
-_CITE_SNIPPET = 100
 
 
 def citation_footer(steps: list[dict], limit: int = _CITE_LIMIT) -> Optional[str]:
-    """Sources block for an answer grounded in ``documents_search`` calls.
+    """One-line Sources suffix for an answer grounded in ``documents_search``.
 
-    Parses the chunk digests already recorded in the run's step transcripts,
-    dedupes repeated chunks (best score wins), and returns a compact
-    end-of-answer block — ``None`` when the run never retrieved chunks, so
-    answers are never decorated with fabricated sources.
+    Parses the chunk digests already recorded in the run's step transcripts
+    and returns a single line naming the ingested resource(s) referenced —
+    e.g. ``Sources: High Performance MongoDB — Asya Kamsky`` — deduped by
+    title, best chunk score first, capped so the line stays short. Returns
+    ``None`` when the run never retrieved chunks, so ungrounded answers are
+    never decorated with fabricated sources.
     """
-    best: dict[tuple[str, int], tuple[float, str]] = {}
+    best: dict[tuple[str, int], float] = {}
     for step in steps or []:
         for call in step.get("tool_calls") or []:
             if call.get("name") != "documents_search":
@@ -459,19 +460,22 @@ def citation_footer(steps: list[dict], limit: int = _CITE_LIMIT) -> Optional[str
                 score = float(match.group(1))
                 title = match.group(2).strip()
                 chunk = int(match.group(3))
-                snippet = " ".join(match.group(4).split())
                 key = (title, chunk)
-                if key not in best or score > best[key][0]:
-                    best[key] = (score, snippet)
+                if key not in best or score > best[key]:
+                    best[key] = score
     if not best:
         return None
-    ordered = sorted(best.items(), key=lambda pair: pair[1][0], reverse=True)
-    lines = ["Sources:"]
-    for (title, chunk), (score, snippet) in ordered[: max(1, int(limit))]:
-        if len(snippet) > _CITE_SNIPPET:
-            snippet = snippet[:_CITE_SNIPPET].rstrip() + "…"
-        lines.append(f"- [{score:.2f}] {title}, chunk {chunk} — “{snippet}”")
-    return "\n".join(lines)
+    ordered = sorted(best.items(), key=lambda pair: pair[1], reverse=True)
+    titles: list[str] = []
+    for (title, _chunk), _score in ordered:
+        if title not in titles:
+            titles.append(title)
+        if len(titles) >= max(1, int(limit)):
+            break
+    line = "Sources: " + ", ".join(titles)
+    if len(titles) < len({title for title, _ in best}):
+        line += " …"
+    return line
 
 
 def _rank(

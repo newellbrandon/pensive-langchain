@@ -542,13 +542,14 @@ class TestDocumentsSearchTool:
             {"document_id": "book", "document_title": "High Perf Mongo",
              "chunk_index": 3, "score": 0.87, "text": "WiredTiger evicts cold pages"},
         ]
-        with mock.patch(
-            "admin.executor.documents_service.search_documents_sync", return_value=hits
-        ) as fake:
-            result = execute_tool_call(
-                {"name": "documents_search", "arguments": '{"query": "cache eviction", "k": 3}'},
-                P("/tmp"),
-            )
+        with mock.patch("admin.executor._memories_for_query", return_value=[]):
+            with mock.patch(
+                "admin.executor.documents_service.search_documents_sync", return_value=hits
+            ) as fake:
+                result = execute_tool_call(
+                    {"name": "documents_search", "arguments": '{"query": "cache eviction", "k": 3}'},
+                    P("/tmp"),
+                )
         assert result["name"] == "documents_search"
         assert "0.87" in result["output"]
         assert "High Perf Mongo" in result["output"]
@@ -559,11 +560,12 @@ class TestDocumentsSearchTool:
         from admin.executor import execute_tool_call
         from pathlib import Path as P
 
-        with mock.patch("admin.executor.documents_service.search_documents_sync", return_value=[]):
-            result = execute_tool_call(
-                {"name": "documents_search", "arguments": '{"query": "anything"}'},
-                P("/tmp"),
-            )
+        with mock.patch("admin.executor._memories_for_query", return_value=[]):
+            with mock.patch("admin.executor.documents_service.search_documents_sync", return_value=[]):
+                result = execute_tool_call(
+                    {"name": "documents_search", "arguments": '{"query": "anything"}'},
+                    P("/tmp"),
+                )
         assert result["output"].startswith("[error]")
         assert "no matches" in result["output"]
 
@@ -571,24 +573,171 @@ class TestDocumentsSearchTool:
         from admin.executor import execute_tool_call
         from pathlib import Path as P
 
-        with mock.patch(
-            "admin.executor.documents_service.search_documents_sync",
-            side_effect=RuntimeError("index down"),
-        ):
-            result = execute_tool_call(
-                {"name": "documents_search", "arguments": '{"query": "x"}'},
-                P("/tmp"),
-            )
+        with mock.patch("admin.executor._memories_for_query", return_value=[]):
+            with mock.patch(
+                "admin.executor.documents_service.search_documents_sync",
+                side_effect=RuntimeError("index down"),
+            ):
+                result = execute_tool_call(
+                    {"name": "documents_search", "arguments": '{"query": "x"}'},
+                    P("/tmp"),
+                )
         assert result["output"].startswith("[error]")
         assert "index down" in result["output"]
 
+    # --- memory-first: Pensive consults its long-term memory BEFORE the corpus ---
+
+    def _call(self, query='{"query": "eviction"}', workspace="/tmp/ag_123"):
+        from admin.executor import execute_tool_call
+        from pathlib import Path as P
+
+        return execute_tool_call(
+            {"name": "documents_search", "arguments": query}, P(workspace)
+        )
+
+    def _memory_hit(self, score=0.91, text="WiredTiger eviction begins when the dirty-page target is reached",
+                    source="semantic", timestamp="2026-11-01T00:00:00+00:00"):
+        return {
+            "text": text,
+            "source": source,
+            "similarity_score": score,
+            "timestamp": timestamp,
+        }
+
+    def test_confident_memory_hit_skips_the_corpus(self):
+        with mock.patch("admin.executor._memories_for_query") as memory:
+            memory.return_value = [self._memory_hit()]
+            with mock.patch("admin.executor.documents_service.search_documents_sync") as corpus:
+                result = self._call()
+        assert corpus.call_count == 0  # memory answered; no corpus query
+        assert result["output"].startswith("[ok]")
+        assert "long-term memory" in result["output"]
+        assert "no corpus query needed" in result["output"]
+        assert "WiredTiger eviction begins" in result["output"]
+        assert "semantic" in result["output"]
+
+    def test_weak_memory_match_falls_through_to_corpus(self):
+        with mock.patch("admin.executor._memories_for_query") as memory:
+            memory.return_value = [self._memory_hit(score=0.55)]
+            with mock.patch(
+                "admin.executor.documents_service.search_documents_sync"
+            ) as corpus:
+                corpus.return_value = [
+                    {"document_id": "book", "document_title": "Book", "chunk_index": 3,
+                     "score": 0.5, "text": "cache eviction"}
+                ]
+                result = self._call()
+        corpus.assert_called_once()
+        assert "(chunk 3)" in result["output"]
+
+    def test_empty_memory_falls_through_to_corpus(self):
+        with mock.patch("admin.executor._memories_for_query", return_value=[]):
+            with mock.patch(
+                "admin.executor.documents_service.search_documents_sync"
+            ) as corpus:
+                corpus.return_value = [
+                    {"document_id": "book", "document_title": "Book", "chunk_index": 3,
+                     "score": 0.5, "text": "cache eviction"}
+                ]
+                result = self._call()
+        corpus.assert_called_once()
+
+    def test_memory_search_failure_degrades_to_corpus(self):
+        # the REAL _memories_for_query catches store failures internally, so
+        # a broken store must never block the corpus path
+        with mock.patch("utils.llm.get_embeddings", side_effect=RuntimeError("store down")):
+            with mock.patch(
+                "admin.executor.documents_service.search_documents_sync"
+            ) as corpus:
+                corpus.return_value = [
+                    {"document_id": "book", "document_title": "Book", "chunk_index": 3,
+                     "score": 0.5, "text": "cache eviction"}
+                ]
+                result = self._call()
+        corpus.assert_called_once()
+
+    def test_memory_lookup_uses_agent_scoped_user_id(self):
+        # user_id threads from the run (agent:<id>) into the memory search;
+        # derived from the workspace directory name when not provided.
+        from admin.executor import execute_tool_call
+        from pathlib import Path as P
+
+        with mock.patch("admin.executor._memories_for_query") as memory:
+            memory.return_value = [self._memory_hit()]
+            with mock.patch("admin.executor.documents_service.search_documents_sync") as corpus:
+                execute_tool_call(
+                    {"name": "documents_search", "arguments": '{"query": "x"}'},
+                    P("/tmp/sub-abc123"),
+                    user_id="agent:sub-abc123",
+                )
+        memory.assert_called_once_with("x", "agent:sub-abc123")
+
+
+class TestMemoriesForQuery:
+    """The memory sweep: own + default + other agents' namespaces."""
+
+    def _sweep(self, docs, embedder_vector=(1.0, 0.0)):
+        from admin.executor import _memories_for_query
+
+        coll = FakeCollection(docs)
+        client = mock.Mock()
+        db = mock.Mock()
+        db.__getitem__ = mock.Mock(side_effect=lambda name: coll if name == "agent_memories" else mock.Mock())
+        client.__getitem__ = mock.Mock(return_value=db)
+        embeddings = mock.Mock()
+        embeddings.embed_query = mock.Mock(return_value=list(embedder_vector))
+        with mock.patch("persistence.mongo.get_client", return_value=client):
+            with mock.patch("utils.llm.get_embeddings", return_value=embeddings):
+                return _memories_for_query("cache eviction", "agent:aaa")
+
+    def _doc(self, namespace, content, embedding, **value_extra):
+        return {
+            "namespace": namespace,
+            "embedding": embedding,
+            "value": {"content": content, "type": "semantic", **value_extra},
+        }
+
+    def test_covers_own_default_and_other_agents_but_not_foreign_users(self):
+        hits = self._sweep(
+            [
+                self._doc(["users", "agent:aaa", "memories", "semantic"], "own fact", [1.0, 0.0]),
+                self._doc(["users", "default", "memories", "semantic"], "user fact", [0.8, 0.6]),
+                self._doc(["users", "agent:bbb", "memories", "semantic"], "other agent fact", [0.6, 0.8]),
+                self._doc(["users", "stranger", "memories", "semantic"], "foreign fact", [0.9, 0.1]),
+            ]
+        )
+        texts = [h["text"] for h in hits]
+        assert texts == ["own fact", "user fact", "other agent fact"]  # score-desc
+        assert "foreign fact" not in texts
+        assert hits[0]["similarity_score"] == 1.0
+        assert hits[0]["source"] == "semantic"
+
+    def test_skips_superseded_and_empty_memories(self):
+        hits = self._sweep(
+            [
+                self._doc(["users", "default", "memories", "semantic"], "good fact", [1.0, 0.0]),
+                self._doc(
+                    ["users", "default", "memories", "semantic"], "stale fact", [1.0, 0.0],
+                    superseded_by_snapshot=True,
+                ),
+                self._doc(["users", "default", "memories", "semantic"], "", [1.0, 0.0]),
+            ]
+        )
+        assert [h["text"] for h in hits] == ["good fact"]
+
+    def test_unreachable_store_returns_empty(self):
+        from admin.executor import _memories_for_query
+
+        with mock.patch("persistence.mongo.get_client", side_effect=RuntimeError("db down")):
+            assert _memories_for_query("q", "agent:aaa") == []
+
 
 class TestCitationFooter:
-    """Sources block appended at the END of a grounded answer (never inline).
+    """One-line Sources footer for a grounded answer (never inline).
 
-    The footer is parsed deterministically from the documents_search tool
-    digests already stored in the run's step transcripts, so it survives
-    answer rewording and is safe to copy-paste.
+    The line is parsed deterministically from the documents_search tool
+    digests stored in the run's step transcripts and lists the ingested
+    resource(s) — proof of grounding, nothing more.
     """
 
     DIGEST = "\n".join([
@@ -604,23 +753,24 @@ class TestCitationFooter:
             for out in outputs
         ]
 
-    def test_parses_digest_into_sources_block(self):
+    def test_parses_digest_into_one_line(self):
         footer = docs.citation_footer(self._steps_with([self.DIGEST]))
-        assert footer is not None
-        assert footer.startswith("Sources:")
-        lines = footer.splitlines()
-        assert len(lines) == 3  # header + 2 hits
-        assert lines[1].startswith("- [0.52] High Performance MongoDB — Asya Kamsky, chunk 202")
-        assert "[error]" not in footer
-        assert footer.index("chunk 202") < footer.index("chunk 386")  # score-desc
+        assert footer == "Sources: High Performance MongoDB — Asya Kamsky"
+        assert "chunk" not in footer
+        assert "[0.52]" not in footer
+        assert "“" not in footer
 
     def test_dedupes_repeated_chunks_keeping_best_score(self):
         first = "  [0.40] Book (chunk 7): first snippet"
         second = "  [0.55] Book (chunk 7): second deeper snippet"
         footer = docs.citation_footer(self._steps_with([first, second]))
-        assert footer.count("chunk 7") == 1
-        assert "[0.55]" in footer and "[0.40]" not in footer
-        assert "second deeper snippet" in footer
+        assert footer == "Sources: Book"
+
+    def test_multiple_resources_listed_in_one_line(self):
+        a = "  [0.40] Book A (chunk 1): snippet"
+        b = "  [0.55] Book B (chunk 2): snippet"
+        footer = docs.citation_footer(self._steps_with([a, b]))
+        assert footer == "Sources: Book B, Book A"  # best score first
 
     def test_none_without_grounded_calls(self):
         assert docs.citation_footer([]) is None
@@ -631,19 +781,14 @@ class TestCitationFooter:
             self._steps_with(["[error] documents_search found no matches — try different wording"])
         ) is None
 
-    def test_caps_source_count(self):
+    def test_resources_capped_keeping_line_short(self):
         digest = "\n".join(
-            [f"  [{i / 10:.2f}] Book (chunk {i}): snippet {i}" for i in range(12)]
+            [f"  [{0.9 - i / 100:.2f}] Title {i} (chunk {i}): snippet" for i in range(12)]
         )
         footer = docs.citation_footer(self._steps_with([digest]))
-        hits = [line for line in footer.splitlines() if line.startswith("- ")]
-        assert len(hits) == 8
-
-    def test_snippet_is_trimmed(self):
-        long = "  [0.90] Book (chunk 1): " + "word " * 60
-        footer = docs.citation_footer(self._steps_with([long]))
-        line = [l for l in footer.splitlines() if l.startswith("- ")][0]
-        assert len(line) < 200
+        assert "…" in footer
+        assert len(footer.split(", ")) <= 9  # "Sources:" + 8 titles + truncation
+        assert "Title 0" in footer and "Title 11" not in footer
 
 
 class TestDocumentsRoutes(unittest.TestCase):

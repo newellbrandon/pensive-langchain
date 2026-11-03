@@ -922,7 +922,7 @@ async def run_agent(
                 )
             )
             for call in tool_calls:
-                executed = execute_tool_call(call, workspace)
+                executed = execute_tool_call(call, workspace, user_id=user_id)
                 executed_calls.append(
                     {
                         "name": executed["name"],
