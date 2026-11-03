@@ -573,6 +573,41 @@ class AgentRunTest(unittest.TestCase):
         self.assertEqual(result["tool_call_count"], 0)
         self.assertEqual(result["step_count"], 0)
 
+    def test_run_appends_sources_footer_for_documents_search(self):
+        # When an agent grounds its answer in the corpus (documents_search),
+        # the run's answer ends with a deterministic Sources block — parsed
+        # from the stored tool digests, so citations never interrupt the prose.
+        graph = _FakeGraph(
+            final_state={
+                "response": "Eviction begins at the dirty-page target.",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "name": "documents_search",
+                        "arguments": '{"query": "eviction target"}',
+                    }
+                ],
+                "decisions": [],
+                "server_tool_log": [],
+            }
+        )
+        with mock.patch("documents.service.search_documents_sync") as search:
+            search.return_value = [
+                {
+                    "document_id": "book",
+                    "document_title": "High Performance MongoDB — Asya Kamsky",
+                    "chunk_index": 202,
+                    "score": 0.52,
+                    "text": "Changing how eviction works",
+                }
+            ]
+            result = _run(admin.run_agent(self.agent, "What drives eviction?", graph))
+        self.assertIn(
+            "\n\nSources:\n- [0.52] High Performance MongoDB — Asya Kamsky, chunk 202",
+            result["answer"],
+        )
+        self.assertGreater(result["tool_call_count"], 0)
+
     def test_run_aggregates_server_loop_calls_into_steps(self):
         # tool calls executed inside generate_response's server loop (glean,
         # spawn, project) must appear in the run's steps and call totals

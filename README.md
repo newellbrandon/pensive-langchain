@@ -185,7 +185,11 @@ Every agent's toolset includes **`documents_search(query, k?, document?)`**: the
 model chooses when to consult the corpus (e.g. a MongoDB-performance question
 against the High Performance MongoDB book), pays for one query embedding + scan
 only when it does, and grounds its answer in the returned chunks with scores.
-The corpus is never injected into prompts automatically.
+The corpus is never injected into prompts automatically. When a run did
+retrieve chunks, its answer ends with a deterministic **Sources** block —
+deduped chunks (best score wins) with score, book title, chunk index, and a
+short snippet — parsed from the tool digests stored in the run transcript, so
+the citations sit at the end and the answer text stays clean to copy-paste.
 
 ## Long-Term Memory (Four Types)
 
