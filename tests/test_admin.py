@@ -591,19 +591,20 @@ class AgentRunTest(unittest.TestCase):
                 "server_tool_log": [],
             }
         )
-        with mock.patch("documents.service.search_documents_sync") as search:
-            search.return_value = [
-                {
-                    "document_id": "book",
-                    "document_title": "High Performance MongoDB — Asya Kamsky",
-                    "chunk_index": 202,
-                    "score": 0.52,
-                    "text": "Changing how eviction works",
-                }
-            ]
-            result = _run(admin.run_agent(self.agent, "What drives eviction?", graph))
+        with mock.patch("admin.executor._memories_for_query", return_value=[]):
+            with mock.patch("documents.service.search_documents_sync") as search:
+                search.return_value = [
+                    {
+                        "document_id": "book",
+                        "document_title": "High Performance MongoDB — Asya Kamsky",
+                        "chunk_index": 202,
+                        "score": 0.52,
+                        "text": "Changing how eviction works",
+                    }
+                ]
+                result = _run(admin.run_agent(self.agent, "What drives eviction?", graph))
         self.assertIn(
-            "\n\nSources:\n- [0.52] High Performance MongoDB — Asya Kamsky, chunk 202",
+            "\n\nSources: High Performance MongoDB — Asya Kamsky",
             result["answer"],
         )
         self.assertGreater(result["tool_call_count"], 0)

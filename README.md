@@ -181,15 +181,21 @@ ground answers in — on demand, never ambient:
    scan — at lab scale no Atlas Search index is needed; swap in `$vectorSearch`
    when the corpus grows). Optionally restrict to one document.
 
-Every agent's toolset includes **`documents_search(query, k?, document?)`**: the
-model chooses when to consult the corpus (e.g. a MongoDB-performance question
-against the High Performance MongoDB book), pays for one query embedding + scan
-only when it does, and grounds its answer in the returned chunks with scores.
+Every agent's toolset includes **`documents_search(query, k?, document?)`** — a
+**memory-first** knowledge lookup: Pensive's long-term memory is swept *before*
+the corpus — the run's own namespace, the console user's (`default`), and
+every other agent/subagent namespace. When a confident match exists
+(similarity ≥ 0.80 — this information was already retrieved and stored, by
+this agent, you, or another agent) the memory facts answer the query, the
+tool says so, and the corpus is **not** queried at all. Only weak or empty
+memory matches fall through to the corpus, which costs one query embedding +
+scan.
 The corpus is never injected into prompts automatically. When a run did
-retrieve chunks, its answer ends with a deterministic **Sources** block —
-deduped chunks (best score wins) with score, book title, chunk index, and a
-short snippet — parsed from the tool digests stored in the run transcript, so
-the citations sit at the end and the answer text stays clean to copy-paste.
+retrieve chunks, its answer ends with a deterministic one-line **Sources**
+suffix — just the name(s) of the ingested resource(s), deduped and best-first
+(e.g. `Sources: High Performance MongoDB — Asya Kamsky`) — parsed from the
+tool digests stored in the run transcript, so the citation sits at the end and
+the answer text stays clean to copy-paste.
 
 ## Long-Term Memory (Four Types)
 

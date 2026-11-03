@@ -9,6 +9,7 @@ exceptions that kill the loop.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -16,7 +17,10 @@ from typing import Callable
 
 from ddgs import DDGS
 
+from config import Config
 from documents import service as documents_service
+
+logger = logging.getLogger(__name__)
 
 # --- workspaces --------------------------------------------------------------
 
@@ -265,17 +269,108 @@ def execute_project_tool_call(
         return {"name": name, "output": f"[error] {type(exc).__name__}: {exc}"}
 
 
-def _handle_documents_search(args: dict, workspace: Path) -> str:
-    """Semantic search over ingested documents (contextualized chunk embeddings).
+# --- documents_search (memory-first knowledge lookup) ------------------------
+#
+# The tool checks Pensive's long-term memory BEFORE the corpus: a fact that
+# was already retrieved and stored (by this agent or another) answers from
+# memory and never pays a corpus query. Vector similarity at or above this
+# score means "memory already has this information".
+_MEMORY_FIRST_SCORE = 0.80
+_MEMORY_HITS_LIMIT = 5
 
-    The corpus holds documents uploaded in the console Documents tab
-    (PDFs/text — e.g. the High Performance MongoDB book), embedded with
-    voyage-context-4 so each chunk captures full-document context. Returns the
-    top-k matching chunks with scores; the model grounds answers in the text.
+
+def _memories_for_query(query: str, user_id: str) -> list[dict]:
+    """Sweep Pensive's long-term memory for the query.
+
+    Covers the run's own memory namespace, the console user's (``default``),
+    and every other agent's (and subagent's) namespace — so facts previously
+    retrieved and stored by this agent, the user, or any other agent can
+    answer from memory before the corpus is touched. One direct scan of the
+    memory collection (dev-scale: dozens of curated facts), query embedded
+    with the SAME Voyage model the store uses, so cosine scores are directly
+    comparable to the store's own vector search. Never raises.
+    """
+    try:
+        from utils.llm import get_embeddings
+        from persistence.mongo import get_client
+
+        vector = get_embeddings().embed_query(query)
+        if not vector:
+            return []
+        collection = get_client()[Config.MONGODB_DB]["agent_memories"]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("documents_search memory lookup failed: %s", exc)
+        return []
+    allowed_users = {user_id, "default"}
+    hits: list[dict] = []
+    try:
+        for doc in collection.find({}):
+            namespace = doc.get("namespace") or []
+            if len(namespace) < 2:
+                continue
+            owner = str(namespace[1])
+            if owner not in allowed_users and not owner.startswith("agent:"):
+                continue
+            value = doc.get("value") or {}
+            if value.get("superseded_by_version_id") or value.get("superseded_by_snapshot"):
+                continue
+            text = str(value.get("content") or "")
+            if not text:
+                continue
+            score = documents_service.cosine(vector, list(doc.get("embedding") or []))
+            if score <= 0.0:
+                continue
+            hits.append(
+                {
+                    "text": text,
+                    "source": str(value.get("type") or "memory"),
+                    "similarity_score": round(score, 4),
+                    "timestamp": str(
+                        value.get("recorded_at") or value.get("updated_at") or ""
+                    )[:10],
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("documents_search memory sweep failed: %s", exc)
+        return []
+    hits.sort(key=lambda hit: hit["similarity_score"], reverse=True)
+    return hits
+
+
+def _handle_documents_search(args: dict, workspace: Path, user_id: str | None = None) -> str:
+    """Memory-first: Pensive's long-term memory is consulted BEFORE the corpus.
+    When a confident fact match exists (vector similarity ≥
+    ``_MEMORY_FIRST_SCORE`` — i.e. this information was already retrieved and
+    stored, by this agent or another), the memory facts are returned and the
+    corpus is not queried at all. Otherwise the corpus (PDFs/text uploaded in
+    the console Documents tab, embedded with voyage-context-4 so each chunk
+    captures full-document context) is searched and the top-k chunks are
+    returned with scores for grounding.
     """
     query = str(args.get("query") or "").strip()
     if not query:
         raise ValueError("query is required")
+    memory_user = user_id or f"agent:{workspace.name}"
+    strong_memories = [
+        hit
+        for hit in _memories_for_query(query, memory_user)
+        if float(hit.get("similarity_score") or 0.0) >= _MEMORY_FIRST_SCORE
+    ]
+    if strong_memories:
+        lines = [
+            f"[ok] {len(strong_memories)} relevant fact(s) from Pensive's "
+            "long-term memory (found before querying the corpus — no corpus "
+            "query needed):"
+        ]
+        for hit in strong_memories[:_MEMORY_HITS_LIMIT]:
+            text = " ".join(str(hit.get("text") or "").split())[:200]
+            score = float(hit.get("similarity_score") or 0.0)
+            ts = str(hit.get("timestamp") or "")[:10]
+            trailer = f" ({ts})" if ts and ts != "None" else ""
+            lines.append(
+                f"  • [{score:.2f}] {hit.get('source') or 'memory'} — {text}{trailer}"
+            )
+        return "\n".join(lines)
     try:
         k = int(args.get("k") or 5)
     except (TypeError, ValueError):
@@ -393,7 +488,11 @@ DEFAULT_AGENT_TOOLS: list[dict] = [
     ),
     _function(
         "documents_search",
-        "Search the ingested knowledge base: documents uploaded in the console "
+        "Memory-first knowledge lookup. First searches Pensive's long-term "
+        "memory: when a confident fact match exists (this information was "
+        "already retrieved and stored by you or another agent), the memory "
+        "facts are returned and the corpus is NOT queried. Otherwise searches "
+        "the ingested knowledge base: documents uploaded in the console "
         "Documents tab (PDFs and text files, e.g. the High Performance MongoDB "
         "book), embedded with contextualized chunk embeddings (voyage-context-4) "
         "so chunks carry full-document context. Ground answers in the returned "
@@ -408,7 +507,12 @@ DEFAULT_AGENT_TOOLS: list[dict] = [
 ]
 
 
-def execute_tool_call(tool_call: dict, workspace: Path, projects_root: Path | None = None) -> dict:
+def execute_tool_call(
+    tool_call: dict,
+    workspace: Path,
+    projects_root: Path | None = None,
+    user_id: str | None = None,
+) -> dict:
     """Execute one tool call. Never raises; returns {'name', 'output'}."""
     name = tool_call.get("name") or ""
     if name in PROJECT_TOOL_NAMES:
@@ -438,6 +542,12 @@ def execute_tool_call(tool_call: dict, workspace: Path, projects_root: Path | No
     if handler is None:
         return {"name": name, "output": f"[error] unknown tool: {name}"}
     try:
-        return {"name": name, "output": handler(args, workspace)}
+        if name == "documents_search":
+            # Memory-first knowledge lookup: the run's scoped user id lets the
+            # tool check Pensive's own long-term memory before the corpus.
+            output = _handle_documents_search(args, workspace, user_id=user_id)
+        else:
+            output = handler(args, workspace)
+        return {"name": name, "output": output}
     except Exception as exc:  # noqa: BLE001 — tool failures are model-visible results
         return {"name": name, "output": f"[error] {type(exc).__name__}: {exc}"}
