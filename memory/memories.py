@@ -1,11 +1,11 @@
 """Four-type long-term memory (semantic / episodic / taxonomic / procedural).
 
-Ported from leafy10's ``memory_pipeline.py`` and adapted to Pensive:
+The pipeline is adapted to Pensive as follows:
 
 - Writes go to per-type namespaces on the LangGraph MongoDBStore:
   ``("users", <user_id>, "memories", <type>)``. Keys are derived from
   ``<type>:<label>`` so re-saving the same label supersedes the prior value
-  (last-write-wins), matching leafy10's newest-fact-wins semantics.
+  (last-write-wins), so the newest saved fact wins.
 - Retrieval vector-searches whichever source types are requested, drops
   superseded/empty facts, then reranks (Voyage, with a vector-similarity
   fallback) and orders newest-first for the prompt context block.

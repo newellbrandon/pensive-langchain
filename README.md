@@ -214,7 +214,7 @@ The **Memories** tab in the Pensive Console (`/ui`) is where you browse and cura
 
 ![Long-term memory in the Pensive Console: four types, per-user counts, and edit or prune](console_long_term_memory.png)
 
-The pipeline (ported from the leafy10 agent in `memory/memories.py`) works like this:
+The pipeline (implemented in `memory/memories.py`) works like this:
 
 1. **Intent planning** (`analyze_intent`) — an LLM turns the latest message into a
    semantic search `query` and a `needs_memory` flag.

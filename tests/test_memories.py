@@ -1,7 +1,6 @@
 """Tests for the four-type (semantic/episodic/taxonomic/procedural) memory module.
 
-Ported from leafy10's memory_pipeline and adapted to Pensive's
-MongoDBStore per-type namespaces and the Responses API client.
+Covers Pensive's MongoDBStore per-type namespaces and the Responses API client.
 """
 from __future__ import annotations
 
