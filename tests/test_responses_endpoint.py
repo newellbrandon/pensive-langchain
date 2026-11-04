@@ -210,7 +210,7 @@ class TestThoughtRendering:
 
     def test_chat_completion_message_has_reasoning_content(self):
         payload = _build_chat_completion(
-            "chatcmpl_1", "pensive", "Hello!", self.DECISIONS, user_query="hi"
+            "chatcmpl_1", "pensive", "Hello!", self.DECISIONS
         )
         message = payload["choices"][0]["message"]
         assert message["content"] == "Hello!"
@@ -218,7 +218,7 @@ class TestThoughtRendering:
         assert payload["workflow"] == self.DECISIONS
 
     def test_chat_completion_no_reasoning_without_decisions(self):
-        payload = _build_chat_completion("chatcmpl_1", "pensive", "Hello!", [], user_query="hi")
+        payload = _build_chat_completion("chatcmpl_1", "pensive", "Hello!", [])
         message = payload["choices"][0]["message"]
         assert message["content"] == "Hello!"
         assert "reasoning_content" not in message
@@ -405,7 +405,6 @@ class TestToolCallRelay:
             "pensive",
             "",
             [],
-            user_query="read the file",
             tool_calls=self.TOOL_CALLS,
         )
         message = payload["choices"][0]["message"]
@@ -652,3 +651,78 @@ class TestContextPreservation:
         assert converted[1].content == "fix it"
         assert isinstance(converted[2], AIMessage)
         assert converted[2].content == "done"
+
+class TestUsageAccounting:
+    """Pensive must report real upstream token usage so harnesses (OpenCode)
+    can count tokens and cost — never length-derived estimates."""
+
+    def test_build_responses_uses_real_tokens(self):
+        resp = _build_responses_response(
+            "resp_1", "pensive", "Hello!", tokens_in=123, tokens_out=45
+        )
+        assert resp["usage"] == {
+            "input_tokens": 123,
+            "output_tokens": 45,
+            "total_tokens": 168,
+        }
+
+    def test_build_chat_completion_uses_real_tokens(self):
+        payload = _build_chat_completion(
+            "chatcmpl_1", "pensive", "Hello!", [], tokens_in=123, tokens_out=45
+        )
+        assert payload["usage"] == {
+            "prompt_tokens": 123,
+            "completion_tokens": 45,
+            "total_tokens": 168,
+        }
+
+    def test_responses_completed_embeds_real_tokens(self):
+        line = _responses_completed("resp_1", "pensive", "Answer", tokens_in=7, tokens_out=3)
+        event = json.loads(line[len("data: "):])
+        assert event["response"]["usage"] == {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+        }
+
+    def test_chat_stream_final_chunk_carries_usage(self):
+        graph = _FakeGraph([], {"response": "hi", "tokens_in": 77, "tokens_out": 11})
+        chunks = asyncio.run(_collect(_stream_graph(graph, {}, {}, "chatcmpl_1", "pensive")))
+
+        final_events = []
+        for chunk in chunks:
+            for line in chunk.split("\n\n"):
+                if not line.startswith("data: "):
+                    continue
+                data = line[len("data: "):].strip()
+                if data == "[DONE]":
+                    continue
+                event = json.loads(data)
+                choices = event.get("choices") or []
+                if choices and choices[0].get("finish_reason"):
+                    final_events.append(event)
+        assert final_events, "must emit a finish_reason chunk"
+        assert final_events[-1].get("usage") == {
+            "prompt_tokens": 77,
+            "completion_tokens": 11,
+            "total_tokens": 88,
+        }
+
+    def test_stream_responses_completed_embeds_real_tokens(self):
+        graph = _FakeGraph([], {"response": "hi", "tokens_in": 77, "tokens_out": 11})
+        chunks = asyncio.run(_collect(_stream_responses(graph, {}, {}, "resp_1", "pensive")))
+
+        events = []
+        for chunk in chunks:
+            if not chunk.startswith("data: "):
+                continue
+            line = chunk[len("data: "):].strip()
+            if line == "[DONE]":
+                continue
+            events.append(json.loads(line))
+        completed = next(e for e in events if e["type"] == "response.completed")
+        assert completed["response"]["usage"] == {
+            "input_tokens": 77,
+            "output_tokens": 11,
+            "total_tokens": 88,
+        }

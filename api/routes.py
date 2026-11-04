@@ -337,12 +337,41 @@ def _responses_latest_user_query(body: dict) -> str:
                     return text
     return ""
 
+def _state_tokens(final_state: dict) -> tuple[int, int]:
+    """Real upstream token usage from the graph state (0 when not recorded).
+
+    The generate node sums usage across its LLM round-trips, so harnesses get
+    honest numbers — unlike length-derived estimates.
+    """
+    tokens_in = int(final_state.get("tokens_in") or 0)
+    tokens_out = int(final_state.get("tokens_out") or 0)
+    return tokens_in, tokens_out
+
+
+def _responses_usage(tokens_in: int, tokens_out: int) -> dict:
+    return {
+        "input_tokens": tokens_in,
+        "output_tokens": tokens_out,
+        "total_tokens": tokens_in + tokens_out,
+    }
+
+
+def _chat_usage(tokens_in: int, tokens_out: int) -> dict:
+    return {
+        "prompt_tokens": tokens_in,
+        "completion_tokens": tokens_out,
+        "total_tokens": tokens_in + tokens_out,
+    }
+
+
 def _build_responses_response(
     completion_id: str,
     model: str,
     content: str,
     decisions: list[dict] | None = None,
     tool_calls: list[dict] | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
 ) -> dict:
     """Build a non-streaming OpenAI Responses API response object.
 
@@ -351,6 +380,7 @@ def _build_responses_response(
     channel (a ``reasoning`` output item) so clients show them as a thought
     block, and mirrored in the standard ``metadata`` field for inspection.
     Tool calls the model requested are emitted as ``function_call`` items.
+    ``usage`` reports the real upstream token counts from the graph state.
     """
     decisions = decisions or []
     tool_calls = tool_calls or []
@@ -388,11 +418,7 @@ def _build_responses_response(
         "model": model,
         "metadata": _workflow_metadata(decisions),
         "output": output,
-        "usage": {
-            "input_tokens": 0,
-            "output_tokens": (len(content) + 3) // 4,
-            "total_tokens": (len(content) + 3) // 4,
-        },
+        "usage": _responses_usage(tokens_in, tokens_out),
         "error": None,
     }
 
@@ -417,9 +443,17 @@ def _responses_completed(
     content: str,
     decisions: list[dict] | None = None,
     tool_calls: list[dict] | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
 ) -> str:
     response = _build_responses_response(
-        completion_id, model, content, decisions, tool_calls
+        completion_id,
+        model,
+        content,
+        decisions,
+        tool_calls,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
     )
     payload = {"type": "response.completed", "response": response}
     return f"data: {json.dumps(payload)}\n\n"
@@ -621,7 +655,16 @@ async def _stream_responses(
         for piece in _word_pieces(content):
             yield _responses_delta_chunk(completion_id, piece)
 
-    yield _responses_completed(completion_id, model, content, decisions, tool_calls)
+    tokens_in, tokens_out = _state_tokens(final_state)
+    yield _responses_completed(
+        completion_id,
+        model,
+        content,
+        decisions,
+        tool_calls,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+    )
     yield "data: [DONE]\n\n"
 
 class _RequestBodyAdapter:
@@ -683,7 +726,12 @@ def _chunk_payload(content: str, completion_id: str, model: str) -> str:
     }
     return f"data: {json.dumps(payload)}\n\n"
 
-def _final_chunk(completion_id: str, model: str, finish_reason: str = "stop") -> str:
+def _final_chunk(
+    completion_id: str,
+    model: str,
+    finish_reason: str = "stop",
+    usage: dict | None = None,
+) -> str:
     payload = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -697,6 +745,8 @@ def _final_chunk(completion_id: str, model: str, finish_reason: str = "stop") ->
             }
         ],
     }
+    if usage:
+        payload["usage"] = usage
     return f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n"
 
 def _tool_call_decl_chunk(
@@ -830,15 +880,22 @@ async def _stream_graph(
         for piece in (_word_pieces(arguments) if arguments else [""]):
             yield _tool_call_arg_chunk(completion_id, model, index, piece)
 
-    yield _final_chunk(completion_id, model, "tool_calls" if tool_calls else "stop")
+    tokens_in, tokens_out = _state_tokens(final_state)
+    yield _final_chunk(
+        completion_id,
+        model,
+        "tool_calls" if tool_calls else "stop",
+        usage=_chat_usage(tokens_in, tokens_out),
+    )
 
 def _build_chat_completion(
     completion_id: str,
     model: str,
     content: str,
     decisions: list[dict],
-    user_query: str,
     tool_calls: list[dict] | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
 ) -> dict:
     """Build a non-streaming Chat Completions response.
 
@@ -846,7 +903,7 @@ def _build_chat_completion(
     attached as ``message.reasoning_content`` (rendered as a thought block)
     and mirrored in a top-level ``workflow`` field. Tool calls the model
     requested are relayed in the assistant message with a ``tool_calls``
-    finish reason.
+    finish reason. ``usage`` reports the real upstream token counts.
     """
     message: dict = {"role": "assistant", "content": content}
     if decisions:
@@ -876,11 +933,7 @@ def _build_chat_completion(
                 "finish_reason": "tool_calls" if tool_calls else "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": len(user_query) // 4,
-            "completion_tokens": len(content) // 4,
-            "total_tokens": (len(user_query) + len(content)) // 4,
-        },
+        "usage": _chat_usage(tokens_in, tokens_out),
     }
     if decisions:
         payload["workflow"] = decisions
@@ -987,13 +1040,15 @@ async def chat_completions(
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     content = _final_answer(final_state)
+    tokens_in, tokens_out = _state_tokens(final_state)
     return _build_chat_completion(
         completion_id,
         model_name,
         content,
         decisions,
-        user_query,
         tool_calls=final_state.get("tool_calls") or [],
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
     )
 
 @app.post("/v1/responses")
@@ -1065,10 +1120,13 @@ async def responses_completions(body: dict, http_request: Request):
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     content = _final_answer(final_state)
+    tokens_in, tokens_out = _state_tokens(final_state)
     return _build_responses_response(
         completion_id,
         model_name,
         content,
         decisions,
         tool_calls=final_state.get("tool_calls") or [],
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
     )
