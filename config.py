@@ -87,7 +87,13 @@ class Config:
         "that spans semantic facts, past episodes, domain knowledge, and how "
         "the user likes things done. Use remembered details to personalize "
         "your reply. Be concise. Never claim to remember anything not in the "
-        "supplied memory.",
+        "supplied memory. "
+        "For open-ended research and verification tasks that need current, "
+        "multi-source, or verifiable information (research questions, deep "
+        "dives, comparisons, fact-checking), delegate to a subagent via "
+        "spawn_subagent with a precise task instead of answering from memory "
+        "alone. Never claim to have used tools, searched sources, or read "
+        "documents you did not actually use.",
     )
 
     OPENWEBUI_USER_ID_HEADER: str = os.getenv(

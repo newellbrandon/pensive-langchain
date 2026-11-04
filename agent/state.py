@@ -36,6 +36,9 @@ class AgentState(TypedDict):
     memory_query: str
     memory_candidates: list[dict]
     memory_context: list[dict]
+    # Research-classified turns (current/external/multi-source info needed)
+    # deterministically delegate to a subagent before the model answers.
+    delegate_research: bool
     # Token accounting: usage (input/output) summed across the generate
     # node's LLM round-trips. Must be declared here or LangGraph drops it
     # from the merged state and agent runs report 0 tokens.

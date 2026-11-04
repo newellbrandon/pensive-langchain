@@ -162,6 +162,12 @@ class FormatTest(unittest.TestCase):
 
 
 class PlanTest(unittest.TestCase):
+    def test_intent_prompt_instructs_research_classification(self):
+        # The planner must recognize requests needing current/external/
+        # multi-source information as intent == "research" so the graph can
+        # delegate them deterministically.
+        self.assertIn("research", mem.INTENT_PROMPT)
+
     def test_falls_back_to_no_memory_search_on_llm_failure(self):
         client = FakeClient(RuntimeError("boom"))
         plan = _run(mem.plan_memory_query(client, [HumanMessage(content="inspire me")]))

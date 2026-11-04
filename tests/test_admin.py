@@ -133,6 +133,15 @@ class SystemPromptTest(unittest.TestCase):
         coll = FakeCollection()
         self.assertEqual(admin.get_system_prompt(collection=coll), Config.SYSTEM_PROMPT)
 
+    def test_default_prompt_instructs_research_delegation(self):
+        # Open-ended research must be delegated to spawn_subagent, and the
+        # model must never claim tool/source use that didn't happen.
+        prompt = Config.SYSTEM_PROMPT.lower()
+        self.assertIn("spawn_subagent", prompt)
+        self.assertIn("research", prompt)
+        self.assertIn("open-ended", prompt)
+        self.assertIn("never claim", prompt)
+
     def test_set_persists_and_get_returns_override(self):
         coll = FakeCollection()
         admin.set_system_prompt("You are a test agent.", collection=coll)

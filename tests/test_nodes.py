@@ -13,6 +13,8 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from admin import service as admin
 from agent import nodes
+from memory import memories
+from memory.memories import MemoryPlan
 
 
 def _run(coro):
@@ -351,3 +353,77 @@ class SpawnSubagentTest(unittest.TestCase):
         second = client.calls[1]["messages"]
         err = [m for m in second if isinstance(m, ToolMessage) and "subagent run failed" in m.content]
         self.assertTrue(err)
+
+class SpawnToolDefinitionTest(unittest.TestCase):
+    def test_spawn_description_guides_research_delegation(self):
+        # The model must recognize open-ended research as a delegation case:
+        # research tasks need spawn_subagent, not a memory-only answer.
+        description = nodes.SPAWN_SUBAGENT_TOOL["function"]["description"].lower()
+        self.assertIn("research", description)
+        self.assertIn("open-ended", description)
+
+
+class ResearchDelegationTest(SpawnSubagentTest):
+    """Research-classified turns must deterministically delegate to a subagent
+    before the model answers — the digest grounds the final response."""
+
+    def _plan(self, intent: str, needs_memory: bool = False) -> MemoryPlan:
+        return MemoryPlan(
+            intent=intent,
+            needs_memory=needs_memory,
+            query="research query",
+            rationale="rationale",
+        )
+
+    def test_research_intent_sets_delegate_flag(self):
+        with mock.patch(
+            "agent.nodes.memories.plan_memory_query",
+            new=mock.AsyncMock(return_value=self._plan("research")),
+        ):
+            result = _run(nodes.analyze_intent(_state()))
+        self.assertTrue(result.get("delegate_research"))
+        self.assertEqual(result["intent"], "research")
+
+    def test_non_research_intent_does_not_delegate(self):
+        with mock.patch(
+            "agent.nodes.memories.plan_memory_query",
+            new=mock.AsyncMock(return_value=self._plan("general")),
+        ):
+            result = _run(nodes.analyze_intent(_state()))
+        self.assertFalse(result.get("delegate_research"))
+        self.assertEqual(result["intent"], "general")
+
+    def test_research_turn_auto_spawns_before_generating(self):
+        state = _state()
+        state["delegate_research"] = True
+        graph = _FakeSubGraph(
+            {"response": "subagent research output", "tool_calls": [], "decisions": []}
+        )
+        result, client = self.run_node(
+            state, [{"text": "Answer grounded in research"}], graph=graph
+        )
+
+        # One auto-spawn executed and recorded as a pensive subagent run.
+        self.assertEqual(len(graph.invocations), 1)
+        self.assertEqual(len(self.recorded_runs), 1)
+        agent_id, task, _, executor = self.recorded_runs[0]
+        self.assertTrue(agent_id.startswith("sub-"))
+        self.assertEqual(task, "delegate the research")
+        self.assertEqual(executor, "pensive")
+
+        # The subagent digest is fed back BEFORE the model's first call, so
+        # the answer is grounded in actual research.
+        messages = client.calls[0]["messages"]
+        tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+        self.assertTrue(any("SUBAGENT ANSWER" in m.content for m in tool_msgs))
+        self.assertEqual(result["response"], "Answer grounded in research")
+        self.assertIn(
+            ("spawn_subagent", "ok"), [(s, d) for s, d, _ in self.decisions]
+        )
+
+    def test_no_research_flag_no_auto_spawn(self):
+        graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})
+        result, _ = self.run_node(_state(), [{"text": "plain answer"}], graph=graph)
+        self.assertEqual(len(graph.invocations), 0)
+        self.assertEqual(self.recorded_runs, [])
+        self.assertEqual(result["response"], "plain answer")

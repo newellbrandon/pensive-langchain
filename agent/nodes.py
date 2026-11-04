@@ -31,11 +31,17 @@ def _latest_user_message(state: AgentState) -> str:
 
 
 async def analyze_intent(state: AgentState) -> dict:
-    """Decide whether long-term memory is needed and build a search query."""
+    """Decide whether long-term memory is needed and build a search query.
+
+    Also classifies research turns (current/external/multi-source/verifiable
+    information needed): those set ``delegate_research`` so the generate node
+    deterministically delegates to a subagent before answering.
+    """
     context = state.get("prompt_messages") or state["messages"]
     client = get_responses_client()
     plan = await memories.plan_memory_query(client, context)
-    intent = "memory" if plan.needs_memory else "general"
+    research = plan.intent.strip().lower() == "research"
+    intent = "research" if research else ("memory" if plan.needs_memory else "general")
     _emit_decision("classify_intent", intent, plan.rationale)
     decision = {
         "step": "classify_intent",
@@ -46,6 +52,7 @@ async def analyze_intent(state: AgentState) -> dict:
         "intent": intent,
         "memory_needed": plan.needs_memory,
         "memory_query": plan.query,
+        "delegate_research": research,
         "decisions": [decision],
     }
 
@@ -142,6 +149,42 @@ async def generate_response(state: AgentState) -> dict:
     tokens_in = 0
     tokens_out = 0
     server_log: list[dict] = []
+
+    # Deterministic research routing: intent analysis classified this turn as
+    # research (current/multi-source/verifiable information needed), so
+    # delegate to a subagent UP FRONT — its digest grounds the final answer
+    # instead of the model answering from memory alone.
+    if offer_server and state.get("delegate_research"):
+        task = _latest_user_message(state)
+        if task:
+            auto_call = {
+                "id": f"auto_spawn_{uuid.uuid4().hex[:12]}",
+                "name": SPAWN_SUBAGENT_NAME,
+                "arguments": json.dumps({"task": task}),
+            }
+            digest = await _execute_server_call(auto_call, state)
+            server_log.append(
+                {
+                    "name": SPAWN_SUBAGENT_NAME,
+                    "arguments": str(task)[:12000],
+                    "output": str(digest or "")[:8000],
+                }
+            )
+            spawn_used += 1
+            server_budget -= 1
+            prompt_messages.append(
+                AIMessage(content="", tool_calls=[_to_langchain_tool_call(auto_call)])
+            )
+            prompt_messages.append(
+                ToolMessage(content=digest, tool_call_id=auto_call.get("id") or "")
+            )
+            _emit_decision(
+                "spawn_subagent",
+                "ok",
+                f"research turn auto-delegated to a subagent "
+                f"({len(str(digest or ''))} chars digest)",
+            )
+
     for _ in range(_SERVER_ITERATION_LIMIT):
         try:
             result = await client.acomplete(
@@ -265,7 +308,10 @@ SPAWN_SUBAGENT_TOOL: dict = {
             "gets its own memory scope, workspace, and tools (file editing, shell, "
             "web search) so this conversation stays clean; only a short digest of "
             "its final answer returns. Pass tools: [] for the defaults. At most 2 "
-            "spawns per turn."
+            "spawns per turn. USE THIS for open-ended research and verification "
+            "tasks that need current, multi-source, or verifiable information "
+            "(research questions, deep dives, comparisons, fact-checking) — do "
+            "not answer such research tasks from memory alone."
         ),
         "parameters": {
             "type": "object",
