@@ -37,6 +37,11 @@ class ResponsesClient:
     The final assistant answer lives in ``output[].content[].text`` on message
     items (``phase == "final_answer"``); reasoning/"thinking" items are
     intentionally ignored so only the real answer reaches the caller.
+
+    When the gateway rejects the request with ``model_not_found`` (some
+    models — deepseek-*, glm-* — only speak Chat Completions), the request is
+    retried against the Chat Completions endpoint with a translated payload
+    (see ``_chat_completions_fallback``).
     """
 
     def __init__(
@@ -198,13 +203,15 @@ class ResponsesClient:
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError:
-                # Surface the upstream error body (the gateway's message is the
-                # only way to diagnose rejected payloads).
-                raise httpx.HTTPStatusError(
-                    f"Upstream Responses API {response.status_code}: {response.text[:500]}",
-                    request=response.request,
-                    response=response,
-                ) from None
+                if not self._is_model_not_found(response):
+                    # Surface the upstream error body (the gateway's message
+                    # is the only way to diagnose rejected payloads).
+                    raise self._upstream_error("Responses", response) from None
+                # The model exists but only speaks Chat Completions — retry
+                # the whole request against the /chat/completions endpoint.
+                return await self._chat_completions_fallback(
+                    messages, tools, tool_choice
+                )
             data = response.json()
 
         usage = data.get("usage") or {}
@@ -268,6 +275,237 @@ class ResponsesClient:
                     "name": item.get("name", ""),
                     "arguments": ResponsesClient._normalize_arguments(
                         item.get("arguments") or ""
+                    ),
+                }
+            )
+        return calls
+
+    @staticmethod
+    def _is_model_not_found(response: httpx.Response) -> bool:
+        """True when the gateway rejects the model as unknown / protocol-less.
+
+        Some gateway models only speak Chat Completions; the Responses
+        endpoint answers 404 with ``error.code == "model_not_found"``.
+        """
+        if getattr(response, "status_code", None) != 404:
+            return False
+        try:
+            code = (response.json().get("error") or {}).get("code")
+        except (ValueError, AttributeError):
+            return False
+        return code == "model_not_found"
+
+    @staticmethod
+    def _upstream_error(protocol: str, response: httpx.Response) -> httpx.HTTPStatusError:
+        """Build an error that carries the upstream body for diagnosis."""
+        return httpx.HTTPStatusError(
+            f"Upstream {protocol} API {response.status_code}: {response.text[:500]}",
+            request=response.request,
+            response=response,
+        )
+
+    async def _chat_completions_fallback(
+        self,
+        messages: List[BaseMessage],
+        tools: Optional[list] = None,
+        tool_choice: Optional[dict] = None,
+    ) -> GenerationResult:
+        """Retry a ``model_not_found`` rejection on the Chat Completions API.
+
+        The payload is translated (``input`` items -> ``messages``,
+        ``instructions`` -> system role, ``max_output_tokens`` ->
+        ``max_tokens``, Responses tools -> Chat ``function`` wrapper) and the
+        chat response is normalized back into a ``GenerationResult``.
+        """
+        url = Config.chat_completions_url()
+        payload = self._build_chat_completions_payload(messages, tools, tool_choice)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                raise self._upstream_error("Chat Completions", response) from None
+            data = response.json()
+
+        usage = data.get("usage") or {}
+        return GenerationResult(
+            text=self._extract_chat_answer(data),
+            tool_calls=self._extract_chat_tool_calls(data),
+            tokens_in=int(usage.get("prompt_tokens") or 0),
+            tokens_out=int(usage.get("completion_tokens") or 0),
+        )
+
+    def _build_chat_completions_payload(
+        self,
+        messages: List[BaseMessage],
+        tools: Optional[list] = None,
+        tool_choice: Optional[dict] = None,
+    ) -> dict:
+        """Translate LangChain messages + tools into a Chat Completions body.
+
+        Mirrors ``_build_input_items`` but for the Chat protocol: system
+        messages become the system role, assistant tool calls replay as
+        ``message.tool_calls``, and tool results carry their ``call_id``
+        pairing as ``tool_call_id``.
+        """
+        chat_messages: list[dict] = []
+        for message in messages:
+            text = self._message_text(message)
+            role = getattr(message, "type", "")
+
+            if role == "system":
+                if text:
+                    chat_messages.append({"role": "system", "content": text})
+                continue
+
+            if role in ("human", "user"):
+                if text:
+                    chat_messages.append({"role": "user", "content": text})
+                continue
+
+            if role == "tool":
+                chat_messages.append(
+                    {
+                        "role": "tool",
+                        "content": text,
+                        "tool_call_id": getattr(message, "tool_call_id", None) or "",
+                    }
+                )
+                continue
+
+            if role in ("ai", "assistant"):
+                entry: dict = {"role": "assistant"}
+                if text:
+                    entry["content"] = text
+                calls = getattr(message, "tool_calls", None) or []
+                if calls:
+                    entry["tool_calls"] = [
+                        {
+                            "id": call.get("id") or f"call_{index}",
+                            "type": "function",
+                            "function": {
+                                "name": call.get("name") or "",
+                                "arguments": (
+                                    json.dumps(call["args"])
+                                    if isinstance(call.get("args"), dict)
+                                    else str(call.get("args") or "{}")
+                                ),
+                            },
+                        }
+                        for index, call in enumerate(calls)
+                    ]
+                chat_messages.append(entry)
+                continue
+
+            if text:
+                chat_messages.append({"role": "user", "content": f"[{role}] {text}"})
+
+        payload: dict = {
+            "model": self._model,
+            "messages": chat_messages,
+            "max_tokens": self._max_output_tokens,
+        }
+        chat_tools = self._normalize_chat_tools(tools)
+        if chat_tools:
+            payload["tools"] = chat_tools
+        chat_tool_choice = self._normalize_chat_tool_choice(tool_choice)
+        if chat_tool_choice is not None:
+            payload["tool_choice"] = chat_tool_choice
+        return payload
+
+    @staticmethod
+    def _normalize_chat_tools(tools: Optional[list]) -> list[dict]:
+        """Convert Responses-format tool specs into Chat Completions specs.
+
+        Accepts both the Responses shape (``{"type": "function", "name", ...}``)
+        and the Chat wrapper (``{"type": "function", "function": {...}}``) and
+        normalizes to the Chat shape.
+        """
+        normalized: list[dict] = []
+        for tool in tools or []:
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                continue
+            if isinstance(tool.get("function"), dict):
+                fn = tool["function"]
+                function: dict = {
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", "") or "",
+                    "parameters": fn.get("parameters") or {},
+                }
+                strict = fn.get("strict")
+            elif tool.get("name"):
+                function = {
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", "") or "",
+                    "parameters": tool.get("parameters") or {},
+                }
+                strict = tool.get("strict")
+            else:
+                continue
+            if strict is not None:
+                function["strict"] = strict
+            normalized.append({"type": "function", "function": function})
+        return normalized
+
+    @staticmethod
+    def _normalize_chat_tool_choice(tool_choice: Optional[dict]) -> Optional[dict]:
+        """Convert a Responses tool_choice into Chat Completions format.
+
+        ``{"type": "function", "name": X}`` becomes the Chat
+        ``{"type": "function", "function": {"name": X}}`` shape; strings and
+        already-normalized dicts pass through unchanged.
+        """
+        if tool_choice is None or isinstance(tool_choice, str):
+            return tool_choice
+        if not isinstance(tool_choice, dict):
+            return None
+        if isinstance(tool_choice.get("function"), dict):
+            return tool_choice
+        name = tool_choice.get("name")
+        if name:
+            return {"type": "function", "function": {"name": name}}
+        return None
+
+    @staticmethod
+    def _extract_chat_answer(data: dict) -> str:
+        """Return the assistant message content from a chat completion."""
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        content = (choices[0].get("message") or {}).get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+            return "".join(parts)
+        return ""
+
+    @staticmethod
+    def _extract_chat_tool_calls(data: dict) -> list[dict]:
+        """Return ``message.tool_calls`` as {id, name, arguments} items."""
+        choices = data.get("choices") or []
+        if not choices:
+            return []
+        message = choices[0].get("message") or {}
+        calls: list[dict] = []
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            calls.append(
+                {
+                    "id": call.get("id") or "",
+                    "name": fn.get("name", "") if isinstance(fn, dict) else "",
+                    "arguments": ResponsesClient._normalize_arguments(
+                        fn.get("arguments") or ""
                     ),
                 }
             )

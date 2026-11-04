@@ -255,7 +255,7 @@ Sort the workflow table by **Fewest tokens** or **Fastest** to surface agents wo
 
 - Python 3.13+
 - MongoDB with Vector Search (local 8.x or Atlas)
-- OpenAI-compatible LLM endpoint. Pensive speaks the OpenAI **Responses API** (`LLM_URI`, `LLM_KEY`, `LLM_MODEL`) so it works correctly with reasoning models; the final answer is read from the response's `output` message items and any model reasoning/"thinking" is discarded.
+- OpenAI-compatible LLM endpoint. Pensive speaks the OpenAI **Responses API** (`LLM_URI`, `LLM_KEY`, `LLM_MODEL`) so it works correctly with reasoning models; the final answer is read from the response's `output` message items and any model reasoning/"thinking" is discarded. Models that only speak Chat Completions (the gateway answers `model_not_found` on `/responses`, e.g. `deepseek-*`, `glm-*`) are retried automatically against `/chat/completions` with a translated payload.
 - Voyage embeddings via MongoDB AI (`LLM_EMBEDDING_KEY`) — custom `VoyageEmbeddings` client in `utils/llm.py`
 - Document ingestion uses the same key against the **contextualized embeddings** endpoint (`CONTEXT_EMBEDDING_URI`, default `https://ai.mongodb.com/v1/contextualizedembeddings`, model `CONTEXT_EMBEDDING_MODEL`, default `voyage-context-4`) — the Files tab uploads land here with server-side auto-chunking
 - Optional memory rerank — set `VOYAGE_API_KEY` to enable Voyage reranking of retrieved memories; otherwise Pensive ranks by vector similarity.

@@ -96,6 +96,20 @@ class TestResponsesUrl:
         )
         assert Config.openai_base_url() == "https://gateway.example/v1"
 
+    def test_chat_completions_url_appends_suffix_when_missing(self, monkeypatch):
+        monkeypatch.setattr(Config, "LLM_URI", "https://gateway.example/v1")
+        assert Config.chat_completions_url() == "https://gateway.example/v1/chat/completions"
+
+    def test_chat_completions_url_leaves_explicit_endpoint(self, monkeypatch):
+        monkeypatch.setattr(
+            Config, "LLM_URI", "https://gateway.example/v1/chat/completions"
+        )
+        assert Config.chat_completions_url() == "https://gateway.example/v1/chat/completions"
+
+    def test_chat_completions_url_maps_responses_uri(self, monkeypatch):
+        monkeypatch.setattr(Config, "LLM_URI", "https://gateway.example/v1/responses")
+        assert Config.chat_completions_url() == "https://gateway.example/v1/chat/completions"
+
 
 class TestResponsesClient:
     def test_builds_request_with_bearer_auth_instructions_and_input(self):
@@ -410,3 +424,269 @@ class TestResponsesClientTools:
             "call_id": "call_1",
             "output": "line 1: # Pensive",
         }
+
+
+# --- Chat Completions fallback ----------------------------------------------
+# Some gateway models (deepseek-*, glm-*) only speak Chat Completions; the
+# Responses endpoint rejects them with `model_not_found`. The client must
+# retry the same request against /chat/completions.
+
+
+def _ok_response(payload: dict):
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value=payload)
+    return resp
+
+
+def _error_response(status: int, body: dict):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.text = httpx.Response(status, json=body).text
+    resp.json = MagicMock(return_value=body)
+    resp.request = MagicMock()
+    resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            f"HTTP {status}", request=resp.request, response=resp
+        )
+    )
+    return resp
+
+
+def _model_not_found_response() -> MagicMock:
+    return _error_response(
+        404,
+        {
+            "error": {
+                "message": "The model does not exist or does not support this protocol.",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "model_not_found",
+            }
+        },
+    )
+
+
+def _chat_completion_response(
+    text: str = "chat answer",
+    tool_calls: list | None = None,
+    usage: dict | None = None,
+) -> MagicMock:
+    message = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    payload = {
+        "id": "chatcmpl_1",
+        "object": "chat.completion",
+        "model": "deepseek-v4-flash-0731",
+        "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+    }
+    if usage:
+        payload["usage"] = usage
+    return _ok_response(payload)
+
+
+class TestChatCompletionsFallback:
+    RESPONSES_URL = "https://gateway.example/v1/responses"
+    CHAT_URL = "https://gateway.example/v1/chat/completions"
+
+    @pytest.fixture(autouse=True)
+    def _pin_llm_uri(self, monkeypatch):
+        # The fallback derives its URL from Config.LLM_URI at call time.
+        monkeypatch.setattr(Config, "LLM_URI", "https://gateway.example/v1/chat/completions")
+
+    def _routed_session(self, responses_by_url: dict) -> AsyncMock:
+        """Return a fake session whose post() returns the response for the URL,
+        recording each (url, kwargs) pair."""
+        calls: list = []
+
+        async def _post(url, **kwargs):
+            calls.append((url, kwargs))
+            return responses_by_url[url]
+
+        session = AsyncMock()
+        session.post = _post
+
+        async def _aenter(*_args, **_kwargs):
+            return session
+
+        async def _aexit(*_args, **_kwargs):
+            return False
+
+        cm = MagicMock()
+        cm.__aenter__ = _aenter
+        cm.__aexit__ = _aexit
+        session._calls = calls
+        session._factory = MagicMock(return_value=cm)
+        return session
+
+    def test_falls_back_to_chat_completions_on_model_not_found(self):
+        session = self._routed_session(
+            {
+                self.RESPONSES_URL: _model_not_found_response(),
+                self.CHAT_URL: _chat_completion_response(
+                    "chat answer", usage={"prompt_tokens": 7, "completion_tokens": 3}
+                ),
+            }
+        )
+        client = ResponsesClient(
+            url=self.RESPONSES_URL, api_key="k", model="deepseek-v4-flash-0731"
+        )
+
+        with patch("httpx.AsyncClient", session._factory):
+            result = _run(client.acomplete([HumanMessage(content="Hi")]))
+
+        assert result.text == "chat answer"
+        assert result.tokens_in == 7
+        assert result.tokens_out == 3
+        assert [url for url, _ in session._calls] == [
+            self.RESPONSES_URL,
+            self.CHAT_URL,
+        ]
+        body = session._calls[1][1]["json"]
+        assert body["model"] == "deepseek-v4-flash-0731"
+        assert body["messages"] == [{"role": "user", "content": "Hi"}]
+        assert body["max_tokens"] == 4096
+
+    def test_translates_instructions_tools_and_tool_replay_for_chat(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        session = self._routed_session(
+            {
+                self.RESPONSES_URL: _model_not_found_response(),
+                self.CHAT_URL: _chat_completion_response("done"),
+            }
+        )
+        client = ResponsesClient(url=self.RESPONSES_URL, api_key="k", model="m")
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+        with patch("httpx.AsyncClient", session._factory):
+            _run(
+                client.acomplete(
+                    [
+                        SystemMessage(content="Be concise."),
+                        HumanMessage(content="read the file"),
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"id": "call_1", "name": "read", "args": {"path": "README.md"}}
+                            ],
+                        ),
+                        ToolMessage(content="# Pensive", tool_call_id="call_1"),
+                    ],
+                    tools=tools,
+                    tool_choice={"type": "function", "name": "read"},
+                )
+            )
+
+        body = session._calls[1][1]["json"]
+        assert body["messages"] == [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "read the file"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": '{"path": "README.md"}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "# Pensive",
+                "tool_call_id": "call_1",
+            },
+        ]
+        assert body["tools"] == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        assert body["tool_choice"] == {"type": "function", "function": {"name": "read"}}
+
+    def test_extracts_chat_tool_calls_together_with_answer(self):
+        session = self._routed_session(
+            {
+                self.RESPONSES_URL: _model_not_found_response(),
+                self.CHAT_URL: _chat_completion_response(
+                    "done",
+                    tool_calls=[
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": '{"path": "README.md"}',
+                            },
+                        }
+                    ],
+                ),
+            }
+        )
+        client = ResponsesClient(url=self.RESPONSES_URL, api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", session._factory):
+            result = _run(client.acomplete([HumanMessage(content="read the file")]))
+
+        assert result.text == "done"
+        assert result.tool_calls == [
+            {"id": "call_abc", "name": "read", "arguments": '{"path": "README.md"}'}
+        ]
+
+    def test_does_not_fall_back_on_other_errors(self):
+        session = self._routed_session(
+            {
+                self.RESPONSES_URL: _error_response(
+                    400,
+                    {
+                        "error": {
+                            "message": "bad function_call",
+                            "type": "invalid_request_error",
+                            "code": None,
+                        }
+                    },
+                )
+            }
+        )
+        client = ResponsesClient(url=self.RESPONSES_URL, api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", session._factory):
+            with pytest.raises(httpx.HTTPStatusError) as excinfo:
+                _run(client.acomplete([HumanMessage(content="Hi")]))
+
+        assert "bad function_call" in str(excinfo.value)
+        assert len(session._calls) == 1
+
+    def test_raises_when_chat_completions_fallback_also_fails(self):
+        session = self._routed_session(
+            {
+                self.RESPONSES_URL: _model_not_found_response(),
+                self.CHAT_URL: _error_response(
+                    500, {"error": {"message": "gateway exploded", "code": None}}
+                ),
+            }
+        )
+        client = ResponsesClient(url=self.RESPONSES_URL, api_key="k", model="m")
+
+        with patch("httpx.AsyncClient", session._factory):
+            with pytest.raises(httpx.HTTPStatusError) as excinfo:
+                _run(client.acomplete([HumanMessage(content="Hi")]))
+
+        assert "Upstream Chat Completions API 500" in str(excinfo.value)
+        assert "gateway exploded" in str(excinfo.value)
