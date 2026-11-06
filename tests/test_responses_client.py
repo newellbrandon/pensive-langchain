@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from config import Config
 from langchain_core.messages import HumanMessage, SystemMessage
-from utils.llm import ResponsesClient, get_responses_client
+from utils.llm import ResponsesClient, get_responses_client, DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def _fake_http(payload: dict):
@@ -203,6 +203,14 @@ class TestResponsesClient:
         assert client._url == "https://g.example/v1/responses"
         assert client._api_key == "k"
         assert client._model == "m"
+
+    def test_output_budget_leaves_room_for_cot_and_large_writes(self):
+        # Reasoning models burn tokens on chain-of-thought BEFORE emitting
+        # function_call items; a tight budget truncates (or never emits) the
+        # call, stalling file writes. The default must clear ~4x the old cap.
+        client = ResponsesClient(url="https://g/v1/responses", api_key="k", model="m")
+        assert client._max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS
+        assert DEFAULT_MAX_OUTPUT_TOKENS >= 8192
 
     def test_preserves_tool_and_unknown_role_content(self):
         from langchain_core.messages import ToolMessage
@@ -546,7 +554,7 @@ class TestChatCompletionsFallback:
         body = session._calls[1][1]["json"]
         assert body["model"] == "deepseek-v4-flash-0731"
         assert body["messages"] == [{"role": "user", "content": "Hi"}]
-        assert body["max_tokens"] == 4096
+        assert body["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
 
     def test_translates_instructions_tools_and_tool_replay_for_chat(self):
         from langchain_core.messages import AIMessage, ToolMessage

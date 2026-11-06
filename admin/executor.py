@@ -11,10 +11,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
+import httpx
 from ddgs import DDGS
 
 from config import Config
@@ -25,9 +28,16 @@ logger = logging.getLogger(__name__)
 # --- workspaces --------------------------------------------------------------
 
 def workspace_root(agent_id: str, base: Path | None = None) -> Path:
-    """Absolute workspace directory for an agent (created on demand)."""
+    """Absolute workspace directory for an agent (created on demand).
+
+    Defaults to the repository's ``agent-workspaces/`` directory so every
+    agent build stays inside the project, wherever the API runs.
+    """
     root = base or Path(
-        os.getenv("PENSIVE_AGENT_WORKSPACES", "~/.pensive/agent-workspaces")
+        os.getenv(
+            "PENSIVE_AGENT_WORKSPACES",
+            str(Path(__file__).resolve().parent.parent / "agent-workspaces"),
+        )
     ).expanduser()
     return (root / agent_id).resolve()
 
@@ -135,18 +145,93 @@ def _handle_web_search(args: dict, workspace: Path) -> str:
     return "\n".join(lines)
 
 
+class _ReadableHtml(HTMLParser):
+    """Minimal HTML → readable-text extraction (stdlib only).
+
+    Strips scripts/styles/templates and collapses layout whitespace, keeping
+    visible content with paragraph breaks — modern JS-rendered pages come
+    back as readable text instead of raw stylesheet noise.
+    """
+
+    _SKIP_TAGS = frozenset({
+        "script", "style", "noscript", "svg", "template", "head",
+        # Site chrome: navigation menus, footers, headers, sidebars repeat on
+        # every page and only add noise to extracted content.
+        "nav", "header", "footer", "aside",
+    })
+    _BLOCK_TAGS = frozenset({
+        "p", "div", "section", "article", "li", "h1", "h2", "h3", "h4", "h5",
+        "h6", "br", "tr", "pre", "blockquote", "ul", "ol", "table", "header",
+        "footer", "nav",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip += 1
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP_TAGS:
+            self._skip = max(0, self._skip - 1)
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        lines = (
+            re.sub(r"[ \t]+", " ", line).strip()
+            for line in "".join(self._parts).splitlines()
+        )
+        return "\n".join(line for line in lines if line)
+
+
+def _html_to_text(html: str) -> str:
+    """Best-effort HTML to readable text (no external dependencies)."""
+    extractor = _ReadableHtml()
+    extractor.feed(str(html or ""))
+    extractor.close()
+    return extractor.text()
+
+
+_EXTRACT_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
 def _handle_web_extract(args: dict, workspace: Path) -> str:
     url = str(args.get("url") or "").strip()
     if not url:
         raise ValueError("url is required")
     try:
-        result = DDGS(timeout=20).extract(url, fmt="text_markdown")
+        response = httpx.get(
+            url,
+            timeout=20,
+            follow_redirects=True,
+            headers={"User-Agent": _EXTRACT_UA},
+        )
+        response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
         raise ValueError(
             f"web extract failed ({type(exc).__name__}: {exc}); "
             "check the URL and retry"
         ) from exc
-    content = str(result.get("content") or "")[:_WEB_EXTRACT_LIMIT]
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "html" not in content_type:
+        return (
+            f"[ok] {url} is not an HTML page ({content_type or 'unknown type'}); "
+            "no readable content. Prefer a documentation or article URL."
+        )
+    content = _html_to_text(response.text)[:_WEB_EXTRACT_LIMIT]
     if not content.strip():
         return f"[ok] no readable content at {url}"
     return f"[ok] extracted {url}:\n{content}"
@@ -395,6 +480,36 @@ def _handle_documents_search(args: dict, workspace: Path, user_id: str | None = 
     return "\n".join(lines)
 
 
+def _handle_pensive_api(args: dict, workspace: Path, user_id: str | None = None) -> str:
+    """Native read-only access to Pensive's own API — never curl it.
+
+    Gives agents a first-class channel to their host's knowledge surfaces
+    (document inventory + corpus search) so shell/curl detours are never
+    needed. The corpus search delegates to the memory-first documents_search
+    (which consults long-term memory when a user scope is provided).
+    """
+    operation = str(args.get("operation") or "").strip()
+    if operation == "list_documents":
+        try:
+            docs = documents_service.list_documents(documents_service.docs_collection())
+        except Exception as exc:  # noqa: BLE001 — model-visible error
+            return f"[error] could not list documents: {type(exc).__name__}: {exc}"
+        if not docs:
+            return "[ok] the knowledge base is empty — no documents uploaded yet."
+        lines = [
+            f"- {d.get('id') or d.get('_id') or '?'}: {d.get('name', '?')} "
+            f"(status: {d.get('status', '?')})"
+            for d in docs
+        ]
+        return f"[ok] {len(docs)} document(s) in the knowledge base:\n" + "\n".join(lines)
+    if operation == "search_documents":
+        return _handle_documents_search(args, workspace, user_id=user_id)
+    return (
+        "[error] unknown pensive_api operation; use one of "
+        "list_documents, search_documents."
+    )
+
+
 _HANDLERS: dict[str, Callable[[dict, Path], str]] = {
     "write_file": _handle_write_file,
     "append_file": _handle_append_file,
@@ -403,6 +518,7 @@ _HANDLERS: dict[str, Callable[[dict, Path], str]] = {
     "web_search": _handle_web_search,
     "web_extract": _handle_web_extract,
     "documents_search": _handle_documents_search,
+    "pensive_api": _handle_pensive_api,  # type: ignore[arg-type]  # user_id passed separately
 }
 
 # --- tool definitions (OpenAI function schema) --------------------------------
@@ -504,6 +620,19 @@ DEFAULT_AGENT_TOOLS: list[dict] = [
          "document": {"type": "string", "description": "Optional document id to restrict the search to (shown in the console Documents tab)"}},
         ["query"],
     ),
+    _function(
+        "pensive_api",
+        "Access Pensive's own API natively (read-only) — NEVER call the API "
+        "over HTTP with curl or shell/network commands; use this tool instead. "
+        "Operations: list_documents (inventory of the uploaded knowledge base "
+        "documents) and search_documents (semantic search of the knowledge "
+        "base, same lookup as documents_search).",
+        {"operation": {"type": "string", "enum": ["list_documents", "search_documents"],
+                        "description": "Which API operation to run"},
+         "query": {"type": "string", "description": "Search query (search_documents only)"},
+         "k": {"type": "integer", "description": "Number of chunks to return (search_documents, default 5, max 10)"}},
+        ["operation"],
+    ),
 ]
 
 
@@ -542,10 +671,10 @@ def execute_tool_call(
     if handler is None:
         return {"name": name, "output": f"[error] unknown tool: {name}"}
     try:
-        if name == "documents_search":
-            # Memory-first knowledge lookup: the run's scoped user id lets the
-            # tool check Pensive's own long-term memory before the corpus.
-            output = _handle_documents_search(args, workspace, user_id=user_id)
+        if name in ("documents_search", "pensive_api"):
+            # user_id lets these tools check Pensive's own long-term memory
+            # before the corpus (memory-first knowledge lookup).
+            output = _handle_documents_search(args, workspace, user_id=user_id) if name == "documents_search" else _handle_pensive_api(args, workspace, user_id=user_id)
         else:
             output = handler(args, workspace)
         return {"name": name, "output": output}

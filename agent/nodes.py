@@ -30,6 +30,40 @@ def _latest_user_message(state: AgentState) -> str:
     return memories.latest_user_text(state["messages"])
 
 
+# Model-visible window for the generate loop: system frames (persona/memory)
+# + the task and most recent activity are kept; middle history is dropped so
+# multi-step server loops do not retransmit every prior tool result verbatim.
+_MODEL_WINDOW = 6
+# Cap for a single tool result replayed into the model context.
+_MODEL_RESULT_CAP = 4000
+
+
+def _windowed_model_messages(prompt_messages: list) -> list:
+    """System prefix + task frame + recent activity (token economy).
+
+    Leading ``SystemMessage`` frames (persona, memory block) always stay;
+    the first non-system message is the task and is preserved; the newest
+    messages carry the latest tool results. The middle of long loops is
+    dropped for the model — the run record keeps the full history.
+    """
+    prefix_end = 0
+    for message in prompt_messages:
+        if isinstance(message, SystemMessage):
+            prefix_end += 1
+        else:
+            break
+    prefix = prompt_messages[:prefix_end]
+    rest = prompt_messages[prefix_end:]
+    if len(rest) <= _MODEL_WINDOW:
+        return list(prompt_messages)
+    return prefix + [rest[0]] + rest[-(_MODEL_WINDOW - 1):]
+
+
+def _cap_model_result(text: str) -> str:
+    """Bound a tool result replayed into the model context."""
+    return str(text or "")[:_MODEL_RESULT_CAP]
+
+
 async def analyze_intent(state: AgentState) -> dict:
     """Decide whether long-term memory is needed and build a search query.
 
@@ -176,7 +210,10 @@ async def generate_response(state: AgentState) -> dict:
                 AIMessage(content="", tool_calls=[_to_langchain_tool_call(auto_call)])
             )
             prompt_messages.append(
-                ToolMessage(content=digest, tool_call_id=auto_call.get("id") or "")
+                ToolMessage(
+                    content=_cap_model_result(digest),
+                    tool_call_id=auto_call.get("id") or "",
+                )
             )
             _emit_decision(
                 "spawn_subagent",
@@ -188,7 +225,7 @@ async def generate_response(state: AgentState) -> dict:
     for _ in range(_SERVER_ITERATION_LIMIT):
         try:
             result = await client.acomplete(
-                prompt_messages,
+                _windowed_model_messages(prompt_messages),
                 tools=tools,
                 tool_choice=tool_choice,
             )
@@ -242,7 +279,9 @@ async def generate_response(state: AgentState) -> dict:
                 AIMessage(content="", tool_calls=[_to_langchain_tool_call(call)])
             )
             prompt_messages.append(
-                ToolMessage(content=digest, tool_call_id=call.get("id") or "")
+                ToolMessage(
+                    content=_cap_model_result(digest), tool_call_id=call.get("id") or ""
+                )
             )
         for call in exhausted:
             prompt_messages.append(
@@ -296,6 +335,18 @@ _SERVER_TOOL_BUDGET = 8
 _SERVER_ITERATION_LIMIT = _SERVER_TOOL_BUDGET + 4
 _SPAWN_DIGEST_ANSWER_LIMIT = 4000
 _SPAWN_DIGEST_OUTPUT_LIMIT = 200
+
+SPAWN_DEFAULT_PROMPT = (
+    "You are a focused subagent that completes the delegated task using "
+    "the available tools. Work autonomously, verify your result, and give "
+    "a concise final answer. "
+    "Pensive's own knowledge is reachable through the provided tools "
+    "(documents_search, pensive_api, glean_*); never call Pensive's API "
+    "over HTTP with curl or shell/network commands. "
+    "Converge fast: prefer a few targeted searches or extractions over "
+    "exhaustive coverage; once you have enough to answer, stop and give "
+    "the final answer directly — do not keep re-searching the same topic."
+)
 
 SERVER_TOOL_NAMES = frozenset({SPAWN_SUBAGENT_NAME, *PROJECT_TOOL_NAMES})
 
@@ -426,11 +477,7 @@ async def _execute_spawn(call: dict, state: AgentState) -> str:
         "id": agent_id,
         "name": admin.autogen_agent_name(),
         "system_prompt": str(args.get("system_prompt") or "").strip()
-        or (
-            "You are a focused subagent that completes the delegated task using "
-            "the available tools. Work autonomously, verify your result, and give "
-            "a concise final answer."
-        ),
+        or SPAWN_DEFAULT_PROMPT,
         "tools": tools or admin.DEFAULT_AGENT_TOOLS,
     }
     try:

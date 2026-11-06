@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,18 @@ class SystemPromptTest(unittest.TestCase):
         admin.set_system_prompt("You are a test agent.", collection=coll)
         self.assertEqual(admin.get_system_prompt(collection=coll), "You are a test agent.")
         self.assertTrue(any(c[0] == "update_one" for c in coll.calls))
+
+    def test_default_prompt_forbids_curling_the_api(self):
+        prompt = Config.SYSTEM_PROMPT.lower()
+        self.assertIn("curl", prompt)
+        self.assertIn("never", prompt)
+
+    def test_default_prompt_honest_about_file_writes(self):
+        # In chats without file tools the model must never claim it saved a
+        # file: no fabricated uploads, no invented paths.
+        prompt = Config.SYSTEM_PROMPT.lower()
+        self.assertIn("no ability to save files", prompt)
+        self.assertIn("spawn_subagent", prompt)
 
 
 class MemoryCurationTest(unittest.TestCase):
@@ -696,6 +709,17 @@ class _ScriptedGraph:
         yield ("values", state)
 
 
+class _FakeResponse:
+    """Stand-in for httpx.Response used by web_extract tests."""
+
+    def __init__(self, text="", content_type="text/html; charset=utf-8"):
+        self.text = text
+        self.headers = {"content-type": content_type}
+
+    def raise_for_status(self):
+        return None
+
+
 class AgentToolLoopTest(unittest.TestCase):
     def test_executes_tool_calls_and_feeds_results_back(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -952,22 +976,97 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("retry", result["output"].lower())
         self.assertNotIn("Traceback", result["output"])
 
-    def test_web_extract_returns_truncated_content(self):
-        class FakeDDGS:
-            def __init__(self, timeout=None):
-                pass
-
-            def extract(self, url, fmt="text_markdown"):
-                return {"url": url, "content": "# Hello\n" + "x" * 10000}
-
-        with mock.patch("admin.executor.DDGS", FakeDDGS):
+    def test_web_extract_reads_html_and_strips_noise(self):
+        # Modern pages (CSS-heavy, script-loaded) must come back as readable
+        # text — the old DDGS proxy returned raw stylesheet noise that made
+        # agents re-extract the same pages in a loop.
+        page = (
+            "<!DOCTYPE html><html><head><style>body{background:#fff}</style>"
+            "<script>var x=1;</script></head><body>"
+            "<nav class=\"css-noise\">menu</nav>"
+            "<article><h1>Atlas Stream Processing Limits</h1>"
+            "<p>Processors fail when memory exceeds 80%.</p>"
+            "<ul><li>SP30 tier</li><li>6.4 GB</li></ul></article>"
+            "</body></html>"
+        )
+        with mock.patch(
+            "admin.executor.httpx.get",
+            return_value=_FakeResponse(page, "text/html; charset=utf-8"),
+        ):
             result = admin.execute_tool_call(
-                {"id": "c1", "name": "web_extract", "arguments": json.dumps({"url": "https://example.com"})},
+                {"id": "c1", "name": "web_extract",
+                 "arguments": json.dumps({"url": "https://docs.mongodb.com/asp"})},
                 self.workspace,
             )
         self.assertIn("[ok]", result["output"])
-        self.assertIn("# Hello", result["output"])
+        self.assertIn("Atlas Stream Processing Limits", result["output"])
+        self.assertIn("80%", result["output"])
+        self.assertNotIn("background:#fff", result["output"])   # CSS gone
+        self.assertNotIn("var x=1", result["output"])           # JS gone
+
+    def test_web_extract_reports_non_html_honestly(self):
+        with mock.patch(
+            "admin.executor.httpx.get",
+            return_value=_FakeResponse("%PDF-1.4", "application/pdf"),
+        ):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_extract",
+                 "arguments": json.dumps({"url": "https://example.com/doc.pdf"})},
+                self.workspace,
+            )
+        self.assertIn("[ok]", result["output"])
+        self.assertIn("not an HTML page", result["output"])
+        self.assertNotIn("%PDF", result["output"])
+
+    def test_web_extract_truncates_long_pages(self):
+        page = "<html><body><p>" + "y" * 20000 + "</p></body></html>"
+        with mock.patch(
+            "admin.executor.httpx.get",
+            return_value=_FakeResponse(page, "text/html"),
+        ):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_extract",
+                 "arguments": json.dumps({"url": "https://example.com/long"})},
+                self.workspace,
+            )
+        self.assertIn("[ok]", result["output"])
         self.assertLess(len(result["output"]), 9000)
+
+    def test_web_extract_failure_is_actionable(self):
+        def boom(url, **kwargs):
+            raise RuntimeError("connection timed out")
+
+        with mock.patch("admin.executor.httpx.get", side_effect=boom):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_extract",
+                 "arguments": json.dumps({"url": "https://example.com/x"})},
+                self.workspace,
+            )
+        self.assertIn("[error]", result["output"])
+        self.assertIn("retry", result["output"].lower())
+        self.assertNotIn("Traceback", result["output"])
+
+    def test_web_extract_skips_site_chrome(self):
+        page = (
+            "<html><body><nav>Home | Docs | Blog</nav>"
+            "<header>Site Header Banner</header>"
+            "<article><h1>Real Title</h1><p>Real content here.</p></article>"
+            "<footer>Copyright 2026 Acme</footer></body></html>"
+        )
+        with mock.patch(
+            "admin.executor.httpx.get",
+            return_value=_FakeResponse(page, "text/html"),
+        ):
+            result = admin.execute_tool_call(
+                {"id": "c1", "name": "web_extract",
+                 "arguments": json.dumps({"url": "https://example.com/docs"})},
+                self.workspace,
+            )
+        self.assertIn("Real Title", result["output"])
+        self.assertIn("Real content here.", result["output"])
+        self.assertNotIn("Home | Docs | Blog", result["output"])   # nav gone
+        self.assertNotIn("Site Header Banner", result["output"])   # header gone
+        self.assertNotIn("Copyright 2026", result["output"])       # footer gone
 
     def test_project_list_and_read_within_projects_root(self):
         root = Path(self.tmp.name) / "projects"
@@ -1453,3 +1552,77 @@ def test_ui_static_served_with_no_cache_headers():
         response = client.get(path)
         assert response.status_code == 200, path
         assert "no-cache" in response.headers.get("cache-control", ""), path
+
+class WorkspaceRootTest(unittest.TestCase):
+    """Agent workspaces must live inside the project's agent-workspaces dir
+    by default — never in stray home-directory caches."""
+
+    def tearDown(self):
+        os.environ.pop("PENSIVE_AGENT_WORKSPACES", None)
+
+    def test_default_root_is_repo_agent_workspaces(self):
+        from admin import executor
+
+        root = executor.workspace_root("sub-test123")
+        expected = (
+            Path(executor.__file__).resolve().parent.parent / "agent-workspaces"
+        ).resolve()
+        self.assertEqual(root, expected / "sub-test123")
+        self.assertIn("pensive-memory", str(root))
+
+    def test_env_var_overrides_default(self):
+        from admin import executor
+
+        os.environ["PENSIVE_AGENT_WORKSPACES"] = "/tmp/pensive-ws-test"
+        self.assertEqual(
+            executor.workspace_root("sub-test123"),
+            (Path("/tmp/pensive-ws-test") / "sub-test123").resolve(),
+        )
+
+
+class AgentTokenEconomyTest(unittest.TestCase):
+    """Agent tool loops must not retransmit the full transcript every step."""
+
+    def test_window_keeps_task_and_recent_activity(self):
+        from admin.service import _agent_model_messages
+
+        transcript = [HumanMessage(content=f"msg {i}") for i in range(20)]
+        windowed = _agent_model_messages(transcript)
+        self.assertEqual(len(windowed), 8)
+        self.assertEqual(windowed[0].content, "msg 0")      # task frame kept
+        self.assertEqual(windowed[-1].content, "msg 19")    # newest kept
+        self.assertNotIn("msg 8", [m.content for m in windowed])  # middle dropped
+
+    def test_window_returns_short_transcript_unchanged(self):
+        from admin.service import _agent_model_messages
+
+        short = [HumanMessage(content="task"), ToolMessage(content="r", tool_call_id="c1")]
+        self.assertEqual(_agent_model_messages(short), short)
+
+    def test_tool_result_capped_before_replay(self):
+        from admin.service import _cap_tool_result
+
+        self.assertEqual(len(_cap_tool_result("x" * 99999)), 8000)
+        self.assertEqual(_cap_tool_result("short"), "short")
+
+    def test_step_limit_is_bounded_by_default(self):
+        import inspect
+
+        default = inspect.signature(admin.run_agent).parameters["max_steps"].default
+        self.assertLessEqual(default, 10)
+
+    def test_nudge_toward_convergence_after_threshold(self):
+        from admin.service import _nudge_toward_convergence
+
+        long = [HumanMessage(content=f"m{i}") for i in range(8)]
+        windowed = list(long[-3:])
+        nudged = _nudge_toward_convergence(long, windowed)
+        self.assertIsInstance(nudged[0], SystemMessage)
+        self.assertIn("STOP researching", nudged[0].content)
+        self.assertEqual(nudged[1:], windowed)
+
+    def test_no_nudge_before_threshold(self):
+        from admin.service import _nudge_toward_convergence
+
+        short = [HumanMessage(content="task")]
+        self.assertEqual(_nudge_toward_convergence(short, short), short)

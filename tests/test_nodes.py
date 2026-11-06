@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from admin import service as admin
 from agent import nodes
@@ -427,3 +427,52 @@ class ResearchDelegationTest(SpawnSubagentTest):
         self.assertEqual(len(graph.invocations), 0)
         self.assertEqual(self.recorded_runs, [])
         self.assertEqual(result["response"], "plain answer")
+
+
+class SpawnPromptConvergenceTest(unittest.TestCase):
+    def test_spawn_default_prompt_pushes_convergence(self):
+        # Subagents must converge fast: few targeted searches, then answer —
+        # not exhaustive re-searching that burns tokens and time.
+        prompt = nodes.SPAWN_DEFAULT_PROMPT.lower()
+        self.assertIn("converge", prompt)
+        self.assertIn("answer directly", prompt)
+
+
+class ModelWindowTest(SpawnSubagentTest):
+    """The generate loop must not retransmit the full transcript either."""
+
+    def _messages(self, count):
+        return [SystemMessage(content="persona")] + [
+            HumanMessage(content=f"msg {i}") for i in range(count)
+        ]
+
+    def test_window_keeps_system_prefix_task_and_recent(self):
+        msgs = self._messages(20)
+        windowed = nodes._windowed_model_messages(msgs)
+        # Persona frame sits ABOVE the window; the conversation slice is
+        # bounded at _MODEL_WINDOW messages.
+        self.assertEqual(len(windowed), 1 + nodes._MODEL_WINDOW)
+        self.assertIsInstance(windowed[0], SystemMessage)  # persona preserved
+        self.assertEqual(windowed[1].content, "msg 0")      # task preserved
+        self.assertEqual(windowed[-1].content, "msg 19")   # newest preserved
+        self.assertNotIn("msg 10", [m.content for m in windowed])
+
+    def test_window_returns_short_transcript_unchanged(self):
+        msgs = self._messages(5)
+        self.assertEqual(nodes._windowed_model_messages(msgs), msgs)
+
+    def test_server_tool_digests_capped_before_replay(self):
+        self.assertEqual(len(nodes._cap_model_result("x" * 99999)), 4000)
+        self.assertEqual(nodes._cap_model_result("short"), "short")
+
+    def test_generate_loop_sends_windowed_messages_per_step(self):
+        # A model that keeps calling server tools must see a bounded context
+        # every round — full-history resends are what blew up input tokens.
+        call = {"id": "g1", "name": "glean_search", "arguments": json.dumps({"query": "q"})}
+        steps = [{"text": "", "tool_calls": [call]} for _ in range(5)]
+        steps.append({"text": "done", "tool_calls": []})
+        graph = _FakeSubGraph({"response": "r", "tool_calls": [], "decisions": []})
+        result, client = self.run_node(_state(), steps, graph=graph)
+        self.assertEqual(result["response"], "done")
+        for recorded in client.calls:
+            self.assertLessEqual(len(recorded["messages"]), 1 + nodes._MODEL_WINDOW)

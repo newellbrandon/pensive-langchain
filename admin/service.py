@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Collection, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from admin.executor import DEFAULT_AGENT_TOOLS, execute_tool_call, safe_workspace_path, workspace_root
 from documents import service as documents_service
@@ -753,6 +753,49 @@ def _all_unparseable_arguments(tool_calls: list[dict]) -> bool:
     return True
 
 
+# Token economy for agent tool loops: the model only ever sees a windowed
+# slice of the transcript (task frame + most recent activity), never the full
+# unbounded history — long loops were retransmitting everything on every step
+# (323k input tokens for one research run). The run record keeps the FULL
+# transcript; only the model payload is windowed.
+_TRANSCRIPT_WINDOW = 8
+# Model-visible cap for a single tool result replayed into the transcript.
+_TRANSCRIPT_RESULT_CAP = 8000
+
+
+def _agent_model_messages(transcript: list) -> list:
+    """Task frame + the most recent activity; middle history is dropped.
+
+    The first message is always the task. Keeping it plus the last N-1
+    messages preserves grounding (what to do) and immediate context (what
+    just happened) while cutting retransmission cost by the loop length.
+    """
+    if len(transcript) <= _TRANSCRIPT_WINDOW:
+        return list(transcript)
+    return [transcript[0]] + list(transcript[-(_TRANSCRIPT_WINDOW - 1):])
+
+
+def _cap_tool_result(text: str) -> str:
+    """Bound a tool result replayed into the model's transcript."""
+    return str(text or "")[:_TRANSCRIPT_RESULT_CAP]
+
+
+# Once a run has been going for a while, the model must stop researching and
+# write its best answer with what it has — convergence over completeness.
+_CONVERGE_NUDGE_AFTER = 6
+_CONVERGE_NUDGE = (
+    "You have used many steps. STOP researching now and write your final "
+    "answer using the information you already gathered — do not fetch more."
+)
+
+
+def _nudge_toward_convergence(transcript: list, windowed: list) -> list:
+    """Prepend a convergence nudge once the run is past the threshold."""
+    if len(transcript) < _CONVERGE_NUDGE_AFTER:
+        return windowed
+    return [SystemMessage(content=_CONVERGE_NUDGE)] + list(windowed)
+
+
 async def _invoke_agent_step(
     graph: Any,
     agent: dict,
@@ -766,7 +809,9 @@ async def _invoke_agent_step(
     (answer, tool_calls, decisions, tokens_in, tokens_out, server_tool_log)."""
     input_state: dict = {
         "messages": [HumanMessage(content=task)],
-        "prompt_messages": list(transcript),
+        "prompt_messages": _nudge_toward_convergence(
+            transcript, _agent_model_messages(transcript)
+        ),
         "decisions": [],
         "user_id": user_id,
         "intent": "",
@@ -820,7 +865,7 @@ async def run_agent(
     task: str,
     graph: Any,
     *,
-    max_steps: int = 24,
+    max_steps: int = 10,
     workspace_base: Path | None = None,
 ) -> dict:
     """Execute a task with the agent's system prompt and tools in complete
@@ -938,7 +983,10 @@ async def run_agent(
                     }
                 )
                 transcript.append(
-                    ToolMessage(content=executed["output"], tool_call_id=call.get("id") or "")
+                    ToolMessage(
+                        content=_cap_tool_result(executed["output"]),
+                        tool_call_id=call.get("id") or "",
+                    )
                 )
         steps.append(
             {

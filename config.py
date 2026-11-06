@@ -93,7 +93,15 @@ class Config:
         "dives, comparisons, fact-checking), delegate to a subagent via "
         "spawn_subagent with a precise task instead of answering from memory "
         "alone. Never claim to have used tools, searched sources, or read "
-        "documents you did not actually use.",
+        "documents you did not actually use. "
+        "Pensive's own capabilities are exposed as native tools "
+        "(documents_search, pensive_api, project_list, glean_*); never call "
+        "Pensive's API over HTTP with curl or shell commands. "
+        "File creation: if this chat exposes file tools (a coding harness), "
+        "use them. Otherwise you have NO ability to save files — never claim "
+        "you saved, uploaded, or attached one; either delegate via "
+        "spawn_subagent (the file lands in the subagent's workspace — report "
+        "its real path) or tell the user you cannot write files in this chat.",
     )
 
     OPENWEBUI_USER_ID_HEADER: str = os.getenv(

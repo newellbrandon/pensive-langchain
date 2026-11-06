@@ -902,3 +902,65 @@ class TestDocumentsRoutes(unittest.TestCase):
         assert body["doc_id"] == "doc1"
         assert body["total"] == 1
         assert body["chunks"][0]["text"] == "cache"
+
+class PensiveApiToolTest(unittest.TestCase):
+    """Agents must reach Pensive's own API natively — never by curling it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _execute(self, args: dict):
+        from admin import executor
+
+        return executor.execute_tool_call(
+            {"name": "pensive_api", "arguments": json.dumps(args)},
+            Path(self.tmp.name),
+        )
+
+    def test_tool_schema_registers_native_operations(self):
+        from admin import executor
+
+        tool = next(
+            t for t in executor.DEFAULT_AGENT_TOOLS
+            if (t.get("function") or {}).get("name") == "pensive_api"
+        )
+        fn = tool["function"]
+        operations = fn["parameters"]["properties"]["operation"]["enum"]
+        self.assertEqual(operations, ["list_documents", "search_documents"])
+        description = fn["description"].lower()
+        self.assertIn("never", description)
+        self.assertIn("curl", description)
+
+    def test_list_documents_returns_inventory(self):
+        from admin import executor
+
+        with mock.patch(
+            "admin.executor.documents_service.docs_collection", return_value=object()
+        ), mock.patch(
+            "admin.executor.documents_service.list_documents",
+            return_value=[
+                {"id": "doc_1", "name": "hpmongo.pdf", "status": "ready", "created_at": "t1"},
+                {"id": "doc_2", "name": "notes.txt", "status": "ready", "created_at": "t2"},
+            ],
+        ):
+            result = self._execute({"operation": "list_documents"})
+        self.assertEqual(result["name"], "pensive_api")
+        self.assertIn("2 document(s)", result["output"])
+        self.assertIn("doc_1", result["output"])
+        self.assertIn("hpmongo.pdf", result["output"])
+
+    def test_search_documents_delegates_to_corpus_search(self):
+        from admin import executor
+
+        with mock.patch(
+            "admin.executor._handle_documents_search", return_value="[ok] chunk results"
+        ) as handler:
+            result = self._execute({"operation": "search_documents", "query": "wiredtiger"})
+        handler.assert_called_once()
+        self.assertIn("[ok]", result["output"])
+
+    def test_unknown_operation_returns_guidance(self):
+        result = self._execute({"operation": "drop_everything"})
+        self.assertIn("[error]", result["output"])
+        self.assertIn("list_documents", result["output"])

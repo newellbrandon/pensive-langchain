@@ -27,6 +27,14 @@ class GenerationResult:
     tokens_out: int = 0
 
 
+# Output budget for upstream completions. Generous on purpose: reasoning
+# models spend tokens on chain-of-thought BEFORE emitting function_call
+# items, and a truncated (or never-emitted) function_call arrives as cut-off
+# JSON arguments — 4096 was too tight for deep planning + large single-call
+# file writes. A ceiling, not a target: typical turns stay far below it.
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+
+
 class ResponsesClient:
     """Minimal async client for the OpenAI Responses API.
 
@@ -50,11 +58,11 @@ class ResponsesClient:
         url: str,
         api_key: str,
         model: str,
-        # Generous budget: the gateway model spends tokens on chain-of-thought
-        # BEFORE emitting function_call items, and a truncated function_call
-        # arrives as cut-off JSON arguments. 1024 was too tight for agents
-        # that write whole files in single tool calls.
-        max_output_tokens: int = 4096,
+        # See DEFAULT_MAX_OUTPUT_TOKENS: the gateway model spends tokens on
+        # chain-of-thought BEFORE emitting function_call items, and a truncated
+        # function_call arrives as cut-off JSON arguments. Keep headroom for
+        # agents that write whole files in single tool calls.
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         timeout: float = 120.0,
     ) -> None:
         self._url = url
